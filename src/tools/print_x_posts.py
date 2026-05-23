@@ -8,6 +8,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SOCIAL_POSTS_DIR = PROJECT_ROOT / "data" / "social_posts"
 WATCHLIST_FILE = PROJECT_ROOT / "data" / "watchlist.json"
+SOCIAL_ALERTS_FILE = PROJECT_ROOT / "data" / "social_alerts.json"
 LEGACY_INPUT_FILE = PROJECT_ROOT / "data" / "x_test_response.json"
 
 
@@ -34,6 +35,25 @@ def load_watchlist():
         return {}
 
     return data
+
+
+def load_social_alerts():
+    if not SOCIAL_ALERTS_FILE.exists():
+        return []
+
+    try:
+        with SOCIAL_ALERTS_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError:
+        return []
+
+    if isinstance(data, list):
+        return [alert for alert in data if isinstance(alert, dict)]
+
+    if isinstance(data, dict):
+        return [data]
+
+    return []
 
 
 def find_latest_social_posts_file():
@@ -149,10 +169,15 @@ def format_score(score):
     if score is None:
         return "indisponivel"
 
-    if float(score).is_integer():
-        return str(int(score))
+    try:
+        number = float(score)
+    except (TypeError, ValueError):
+        return str(score)
 
-    return f"{score:.2f}".replace(".", ",")
+    if number.is_integer():
+        return str(int(number))
+
+    return f"{number:.2f}".replace(".", ",")
 
 
 def get_reason_values(tweet):
@@ -174,7 +199,23 @@ def get_reason_values(tweet):
     return []
 
 
-def build_summary(tweets, users_by_id, returned_posts=None, tracked_posts=None):
+def get_alert_for_token(token_address):
+    if not token_address:
+        return None
+
+    wanted = str(token_address).lower()
+    matches = [
+        alert for alert in load_social_alerts()
+        if str(alert.get("token_address", "")).lower() == wanted
+    ]
+
+    if not matches:
+        return None
+
+    return sorted(matches, key=lambda alert: str(alert.get("timestamp", "")))[-1]
+
+
+def build_summary(tweets, users_by_id, returned_posts=None, tracked_posts=None, alert_context=None):
     if returned_posts is None:
         returned_posts = len(tweets)
 
@@ -206,8 +247,26 @@ def build_summary(tweets, users_by_id, returned_posts=None, tracked_posts=None):
 
     best_score = scored_tweets[0][0] if scored_tweets else None
     best_tweet = scored_tweets[0][1] if scored_tweets else {}
+    alert_rank = None
     alert = best_score is not None and best_score > 0
     reasons = get_reason_values(best_tweet)
+
+    if alert_context:
+        alert_score = alert_context.get("best_post_score")
+        alert_rank = alert_context.get("alert_rank")
+        alert_reasons = alert_context.get("alert_reasons") or []
+
+        if best_score is None and alert_score is not None:
+            try:
+                best_score = float(alert_score)
+            except (TypeError, ValueError):
+                best_score = alert_score
+
+        if alert_rank is not None:
+            alert = True
+
+        if alert_reasons:
+            reasons = [str(reason) for reason in alert_reasons]
 
     if alert and not reasons:
         best_author = users_by_id.get(best_tweet.get("author_id"), {})
@@ -229,6 +288,7 @@ def build_summary(tweets, users_by_id, returned_posts=None, tracked_posts=None):
         "top_followers": top_followers or 0,
         "best_score": best_score,
         "alert": alert,
+        "alert_rank": alert_rank,
         "reasons": reasons,
     }
 
@@ -243,7 +303,8 @@ def print_summary(summary):
     print(f"- Melhor post_score: {format_score(summary['best_score'])}")
 
     if summary["alert"]:
-        print(f"- Alerta: sim, rank {format_score(summary['best_score'])}")
+        rank = summary["alert_rank"] if summary["alert_rank"] is not None else summary["best_score"]
+        print(f"- Alerta: sim, rank {format_score(rank)}")
     else:
         print("- Alerta: nao")
 
@@ -383,6 +444,7 @@ def print_report(input_file, payload, limit, tracked_only):
 
     original_tweets = tweets
     original_tweet_count = len(original_tweets)
+    alert_context = get_alert_for_token(metadata.get("token_address"))
     tracked_filter_applied = False
     tracked_filter_warning = None
 
@@ -434,6 +496,7 @@ def print_report(input_file, payload, limit, tracked_only):
             users_by_id,
             returned_posts=original_tweet_count,
             tracked_posts=tracked_posts_count,
+            alert_context=alert_context,
         )
     )
 
