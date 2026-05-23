@@ -310,10 +310,14 @@ def print_report(input_file, payload, limit, tracked_only):
     if not isinstance(tweets, list):
         tweets = []
 
-    original_tweet_count = len(tweets)
+    original_tweets = tweets
+    original_tweet_count = len(original_tweets)
+    tracked_tweets = [tweet for tweet in original_tweets if get_post_score(tweet) is not None]
+    tracked_filter_applied = False
 
-    if tracked_only:
-        tweets = [tweet for tweet in tweets if get_post_score(tweet) is not None]
+    if tracked_only and tracked_tweets:
+        tweets = tracked_tweets
+        tracked_filter_applied = True
 
     if limit is not None:
         tweets_to_print = tweets[:limit]
@@ -333,12 +337,18 @@ def print_report(input_file, payload, limit, tracked_only):
 
     print(f"Posts: {len(tweets)}")
     if tracked_only:
-        print(f"Filtro tracked-only: {len(tweets)} de {original_tweet_count}")
+        if tracked_filter_applied:
+            print(f"Filtro tracked-only: {len(tweets)} de {original_tweet_count}")
+        else:
+            print(
+                "Filtro tracked-only: nenhum post com krptov_post_score no arquivo; "
+                f"mostrando todos os {original_tweet_count} retornados."
+            )
     print(f"Usuarios: {len(users_by_id)}")
     print_meta(response)
     print()
 
-    print_summary(build_summary(tweets, users_by_id))
+    print_summary(build_summary(original_tweets, users_by_id))
 
     if not tweets:
         print("Nenhum post encontrado neste arquivo.")
