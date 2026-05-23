@@ -293,12 +293,13 @@ def load_bearer_token():
 
 
 def search_token_mentions(token_address, bearer_token, max_results):
+    api_max_results = max(10, int(max_results))
     headers = {
         "Authorization": f"Bearer {bearer_token}",
     }
     params = {
         "query": f'"{token_address}"',
-        "max_results": int(max_results),
+        "max_results": api_max_results,
         "tweet.fields": "author_id,created_at,public_metrics,text",
         "expansions": "author_id",
         "user.fields": "username,name,description,created_at,verified,verified_type,is_identity_verified,affiliation,public_metrics,protected,parody,url",
@@ -500,12 +501,17 @@ def get_latest_tweet_id(tweets):
     return str(max(numeric_ids))
 
 
-def get_tweet_ids(tweets):
-    return [
+def get_tweet_ids(tweets, limit=None):
+    tweet_ids = [
         str(tweet.get("id"))
         for tweet in tweets
         if tweet.get("id")
     ]
+
+    if limit is None:
+        return tweet_ids
+
+    return tweet_ids[: int(limit)]
 
 
 def filter_response_to_tracked_posts(response_payload, tracked_tweet_ids):
@@ -852,7 +858,10 @@ def run_cycle(config_file=CONFIG_FILE):
             save_raw_posts(normalized_address, response_payload, current_time)
             tracked_tweet_ids = entry.get("social_tracked_tweet_ids") or []
             if not tracked_tweet_ids:
-                tracked_tweet_ids = get_tweet_ids(response_payload.get("data") or [])
+                tracked_tweet_ids = get_tweet_ids(
+                    response_payload.get("data") or [],
+                    limit=config["max_posts_per_token"],
+                )
                 entry["social_tracked_tweet_ids"] = tracked_tweet_ids
                 entry["social_tracked_posts_count"] = len(tracked_tweet_ids)
                 entry["social_total_posts_seen"] = len(tracked_tweet_ids)
