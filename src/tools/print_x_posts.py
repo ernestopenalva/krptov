@@ -7,6 +7,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SOCIAL_POSTS_DIR = PROJECT_ROOT / "data" / "social_posts"
+WATCHLIST_FILE = PROJECT_ROOT / "data" / "watchlist.json"
 LEGACY_INPUT_FILE = PROJECT_ROOT / "data" / "x_test_response.json"
 
 
@@ -17,6 +18,22 @@ if hasattr(sys.stdout, "reconfigure"):
 def load_json(input_file):
     with input_file.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_watchlist():
+    if not WATCHLIST_FILE.exists():
+        return {}
+
+    try:
+        with WATCHLIST_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError:
+        return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    return data
 
 
 def find_latest_social_posts_file():
@@ -71,6 +88,19 @@ def unwrap_payload(payload):
 def build_users_by_id(response):
     users = response.get("includes", {}).get("users", [])
     return {user["id"]: user for user in users if isinstance(user, dict) and "id" in user}
+
+
+def filter_users_by_tweets(users_by_id, tweets):
+    author_ids = {
+        tweet.get("author_id")
+        for tweet in tweets
+        if isinstance(tweet, dict) and tweet.get("author_id")
+    }
+    return {
+        user_id: user
+        for user_id, user in users_by_id.items()
+        if user_id in author_ids
+    }
 
 
 def format_bool(value):
@@ -144,9 +174,12 @@ def get_reason_values(tweet):
     return []
 
 
-def build_summary(tweets, users_by_id):
-    returned_posts = len(tweets)
-    tracked_posts = sum(1 for tweet in tweets if get_post_score(tweet) is not None)
+def build_summary(tweets, users_by_id, returned_posts=None, tracked_posts=None):
+    if returned_posts is None:
+        returned_posts = len(tweets)
+
+    if tracked_posts is None:
+        tracked_posts = sum(1 for tweet in tweets if get_post_score(tweet) is not None)
 
     top_author = {}
     top_followers = None
@@ -300,6 +333,44 @@ def print_meta(response):
         print(f"Oldest id: {oldest_id}")
 
 
+def get_watchlist_token(watchlist, token_address):
+    if not token_address:
+        return None
+
+    token_address = str(token_address).lower()
+    return watchlist.get(token_address) or watchlist.get(str(token_address))
+
+
+def get_tracked_tweet_ids(token_data):
+    if not isinstance(token_data, dict):
+        return []
+
+    tweet_ids = token_data.get("social_tracked_tweet_ids")
+
+    if not isinstance(tweet_ids, list):
+        return []
+
+    return [str(tweet_id) for tweet_id in tweet_ids if tweet_id]
+
+
+def filter_tracked_tweets_from_watchlist(tweets, token_address):
+    watchlist = load_watchlist()
+    token_data = get_watchlist_token(watchlist, token_address)
+    tracked_ids = set(get_tracked_tweet_ids(token_data))
+
+    if not token_data:
+        return tweets, False, "token nao encontrado em data/watchlist.json"
+
+    if not tracked_ids:
+        return tweets, False, "social_tracked_tweet_ids nao encontrado ou vazio na watchlist"
+
+    filtered = [
+        tweet for tweet in tweets
+        if str(tweet.get("id")) in tracked_ids
+    ]
+    return filtered, True, None
+
+
 def print_report(input_file, payload, limit, tracked_only):
     unwrapped = unwrap_payload(payload)
     metadata = unwrapped["metadata"]
@@ -312,12 +383,21 @@ def print_report(input_file, payload, limit, tracked_only):
 
     original_tweets = tweets
     original_tweet_count = len(original_tweets)
-    tracked_tweets = [tweet for tweet in original_tweets if get_post_score(tweet) is not None]
     tracked_filter_applied = False
+    tracked_filter_warning = None
 
-    if tracked_only and tracked_tweets:
-        tweets = tracked_tweets
-        tracked_filter_applied = True
+    if tracked_only:
+        tweets, tracked_filter_applied, tracked_filter_warning = filter_tracked_tweets_from_watchlist(
+            original_tweets,
+            metadata.get("token_address"),
+        )
+
+    if tracked_filter_applied:
+        users_by_id = filter_users_by_tweets(users_by_id, tweets)
+
+    tracked_posts_count = len(tweets) if tracked_filter_applied else sum(
+        1 for tweet in original_tweets if get_post_score(tweet) is not None
+    )
 
     if limit is not None:
         tweets_to_print = tweets[:limit]
@@ -338,17 +418,24 @@ def print_report(input_file, payload, limit, tracked_only):
     print(f"Posts: {len(tweets)}")
     if tracked_only:
         if tracked_filter_applied:
-            print(f"Filtro tracked-only: {len(tweets)} de {original_tweet_count}")
+            print(f"Tracked posts: {len(tweets)} de {original_tweet_count} retornados")
         else:
             print(
-                "Filtro tracked-only: nenhum post com krptov_post_score no arquivo; "
+                f"Filtro tracked-only: {tracked_filter_warning}; "
                 f"mostrando todos os {original_tweet_count} retornados."
             )
     print(f"Usuarios: {len(users_by_id)}")
     print_meta(response)
     print()
 
-    print_summary(build_summary(original_tweets, users_by_id))
+    print_summary(
+        build_summary(
+            tweets if tracked_filter_applied else original_tweets,
+            users_by_id,
+            returned_posts=original_tweet_count,
+            tracked_posts=tracked_posts_count,
+        )
+    )
 
     if not tweets:
         print("Nenhum post encontrado neste arquivo.")
@@ -388,7 +475,7 @@ def parse_args():
     parser.add_argument(
         "--tracked-only",
         action="store_true",
-        help="Mostra apenas posts com krptov_post_score.",
+        help="Mostra apenas tweets cujos IDs estejam em social_tracked_tweet_ids na watchlist.",
     )
     return parser.parse_args()
 
