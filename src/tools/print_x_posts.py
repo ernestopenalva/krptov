@@ -103,6 +103,121 @@ def get_tweet_url(tweet, author):
     return f"https://x.com/{username}/status/{tweet_id}"
 
 
+def get_post_score(tweet):
+    score = tweet.get("krptov_post_score")
+
+    if score is None:
+        return None
+
+    try:
+        return float(score)
+    except (TypeError, ValueError):
+        return None
+
+
+def format_score(score):
+    if score is None:
+        return "indisponivel"
+
+    if float(score).is_integer():
+        return str(int(score))
+
+    return f"{score:.2f}".replace(".", ",")
+
+
+def get_reason_values(tweet):
+    for key in (
+        "krptov_score_reasons",
+        "krptov_reasons",
+        "krptov_alert_reasons",
+        "post_score_reasons",
+        "reasons",
+    ):
+        reasons = tweet.get(key)
+
+        if isinstance(reasons, list):
+            return [str(reason) for reason in reasons if reason]
+
+        if isinstance(reasons, str) and reasons.strip():
+            return [part.strip() for part in reasons.split(",") if part.strip()]
+
+    return []
+
+
+def build_summary(tweets, users_by_id):
+    returned_posts = len(tweets)
+    tracked_posts = sum(1 for tweet in tweets if get_post_score(tweet) is not None)
+
+    top_author = {}
+    top_followers = None
+
+    for tweet in tweets:
+        author = users_by_id.get(tweet.get("author_id"), {})
+        followers = author.get("public_metrics", {}).get("followers_count", 0)
+
+        try:
+            followers = int(followers)
+        except (TypeError, ValueError):
+            followers = 0
+
+        if top_followers is None or followers > top_followers:
+            top_author = author
+            top_followers = followers
+
+    scored_tweets = [
+        (get_post_score(tweet), tweet)
+        for tweet in tweets
+        if get_post_score(tweet) is not None
+    ]
+    scored_tweets.sort(key=lambda item: item[0], reverse=True)
+
+    best_score = scored_tweets[0][0] if scored_tweets else None
+    best_tweet = scored_tweets[0][1] if scored_tweets else {}
+    alert = best_score is not None and best_score > 0
+    reasons = get_reason_values(best_tweet)
+
+    if alert and not reasons:
+        best_author = users_by_id.get(best_tweet.get("author_id"), {})
+        followers = best_author.get("public_metrics", {}).get("followers_count", 0)
+
+        try:
+            followers = int(followers)
+        except (TypeError, ValueError):
+            followers = 0
+
+        if followers >= 10000:
+            reasons.append("followers_high")
+        reasons.append("post_score")
+
+    return {
+        "returned_posts": returned_posts,
+        "tracked_posts": tracked_posts,
+        "top_author": top_author,
+        "top_followers": top_followers or 0,
+        "best_score": best_score,
+        "alert": alert,
+        "reasons": reasons,
+    }
+
+
+def print_summary(summary):
+    top_username = summary["top_author"].get("username", "unknown")
+    reasons = ", ".join(summary["reasons"]) if summary["reasons"] else "indisponivel"
+
+    print("Resumo:")
+    print(f"- Tracked posts: {summary['tracked_posts']} de {summary['returned_posts']} retornados")
+    print(f"- Maior autor: @{top_username}, {format_metric(summary['top_followers'])} followers")
+    print(f"- Melhor post_score: {format_score(summary['best_score'])}")
+
+    if summary["alert"]:
+        print(f"- Alerta: sim, rank {format_score(summary['best_score'])}")
+    else:
+        print("- Alerta: nao")
+
+    print(f"- Motivos: {reasons}")
+    print()
+
+
 def print_user(author):
     user_metrics = author.get("public_metrics", {})
     username = author.get("username", "unknown")
@@ -215,6 +330,8 @@ def print_report(input_file, payload, limit):
     print(f"Usuarios: {len(users_by_id)}")
     print_meta(response)
     print()
+
+    print_summary(build_summary(tweets, users_by_id))
 
     if not tweets:
         print("Nenhum post encontrado neste arquivo.")
