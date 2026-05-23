@@ -300,7 +300,7 @@ def print_meta(response):
         print(f"Oldest id: {oldest_id}")
 
 
-def print_report(input_file, payload, limit):
+def print_report(input_file, payload, limit, tracked_only):
     unwrapped = unwrap_payload(payload)
     metadata = unwrapped["metadata"]
     response = unwrapped["response"]
@@ -309,6 +309,11 @@ def print_report(input_file, payload, limit):
 
     if not isinstance(tweets, list):
         tweets = []
+
+    original_tweet_count = len(tweets)
+
+    if tracked_only:
+        tweets = [tweet for tweet in tweets if get_post_score(tweet) is not None]
 
     if limit is not None:
         tweets_to_print = tweets[:limit]
@@ -327,6 +332,8 @@ def print_report(input_file, payload, limit):
         print(f"Source: {metadata['source']}")
 
     print(f"Posts: {len(tweets)}")
+    if tracked_only:
+        print(f"Filtro tracked-only: {len(tweets)} de {original_tweet_count}")
     print(f"Usuarios: {len(users_by_id)}")
     print_meta(response)
     print()
@@ -368,6 +375,11 @@ def parse_args():
         default=None,
         help="Limita a quantidade de posts impressos.",
     )
+    parser.add_argument(
+        "--tracked-only",
+        action="store_true",
+        help="Mostra apenas posts com krptov_post_score.",
+    )
     return parser.parse_args()
 
 
@@ -380,7 +392,7 @@ def main():
         raise SystemExit(f"Arquivo nao encontrado: {input_file}")
 
     payload = load_json(input_file)
-    print_report(input_file, payload, args.limit)
+    print_report(input_file, payload, args.limit, args.tracked_only)
 
 
 if __name__ == "__main__":
