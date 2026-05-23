@@ -1,0 +1,23 @@
+# ambiente
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# logs
+logs/*
+!logs/.gitkeep
+
+# dados gerados
+data/*.json
+data/*.jsonl
+data/social_posts/
+data/social_inference_usage_*.json
+!data/.gitkeep
+
+# sistema/editor
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

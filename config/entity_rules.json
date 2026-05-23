@@ -1,0 +1,23 @@
+{
+  "scanner": {
+    "keywords": {
+      "MC:": 1,
+      "Liq:": 1,
+      "Volume": 1,
+      "DEXScreener": 2,
+      "CA:": 1,
+      "UNISWAP": 1
+    }
+  },
+  "promoter": {
+    "keywords": {
+      "1000x": 2,
+      "DM": 1,
+      "Discord": 1,
+      "Telegram": 1,
+      "TG": 1,
+      "next gem": 2,
+      "CryptoGems": 1
+    }
+  }
+}

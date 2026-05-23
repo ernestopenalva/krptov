@@ -1,0 +1,57 @@
+token_scanner:
+  chain_id: ethereum
+
+  watchlist_max_tokens: 10
+  watchlist_infinite: true
+
+  feed_disappearance_minutes: 60
+
+  discard_retention_hours: 168
+
+  cycle_interval_seconds: 60
+
+social_inference:
+  enabled: true
+  monitoring_window_hours: 22
+  max_posts_per_token: 8
+  cycle_interval_seconds: 180
+  max_new_tokens_per_day: 30
+
+  alert_rules:
+    alert_on_any_affiliation: true
+    min_followers_to_alert: 20000
+    min_post_score_to_alert: 60
+    min_bio_pattern_hits_to_alert: 1
+
+  author_followers_thresholds:
+    medium: 5000
+    high: 20000
+    critical: 100000
+
+  post_metric_weights:
+    like_count: 3
+    reply_count: 4
+    retweet_count: 5
+    quote_count: 4
+    bookmark_count: 2
+    impression_count: 0
+
+  post_score:
+    divisor: 1
+    max_score: 1000000
+
+  bio_patterns:
+    - "coinbase"
+    - "@coinbase"
+    - "base"
+    - "@base"
+    - "ethereum"
+    - ".eth"
+    - "founder"
+    - "co-founder"
+    - "ceo"
+    - "cto"
+    - "engineer"
+    - "researcher"
+    - "protocol"
+    - "core contributor"
