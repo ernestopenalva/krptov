@@ -19,11 +19,16 @@ SOCIAL_POSTS_DIR = DATA_DIR / "social_posts"
 DEFAULT_LIMIT = 10
 DEFAULT_CONFIG = {
     "enabled": None,
+    "scoring_mode": None,
+    "disable_post_metric_alerts": None,
     "monitoring_window_hours": None,
     "max_posts_per_token": 8,
     "cycle_interval_seconds": 180,
     "max_new_tokens_per_day": None,
+    "followers_alert_threshold": None,
     "alert_rules": {},
+    "badges": {},
+    "automation": {},
 }
 
 
@@ -130,13 +135,15 @@ def load_jsonl(path, warnings=None):
 def load_simple_social_config(warnings):
     config = DEFAULT_CONFIG.copy()
     config["alert_rules"] = {}
+    config["badges"] = {}
+    config["automation"] = {}
 
     if not CONFIG_FILE.exists():
         warnings.append(f"Config ausente: {relative(CONFIG_FILE)}")
         return config
 
     in_social = False
-    in_alert_rules = False
+    nested_section = None
 
     for raw_line in CONFIG_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
         no_comment = raw_line.split("#", 1)[0].rstrip()
@@ -149,18 +156,18 @@ def load_simple_social_config(warnings):
 
         if indent == 0:
             in_social = stripped == "social_inference:"
-            in_alert_rules = False
+            nested_section = None
             continue
 
         if not in_social:
             continue
 
-        if indent == 2 and stripped == "alert_rules:":
-            in_alert_rules = True
+        if indent == 2 and stripped in ("alert_rules:", "badges:", "automation:"):
+            nested_section = stripped[:-1]
             continue
 
         if indent == 2:
-            in_alert_rules = False
+            nested_section = None
 
         if ":" not in stripped:
             continue
@@ -172,8 +179,8 @@ def load_simple_social_config(warnings):
         if value == "":
             continue
 
-        if in_alert_rules and indent >= 4:
-            config["alert_rules"][key] = parse_scalar(value)
+        if nested_section and indent >= 4:
+            config[nested_section][key] = parse_scalar(value)
         elif indent == 2 and key in config:
             config[key] = parse_scalar(value)
 
@@ -222,6 +229,25 @@ def format_percent(value):
         return "indisponivel"
 
     return f"{value:.1f}%".replace(".", ",")
+
+
+def format_alert_reasons(reasons):
+    if not reasons:
+        return "nenhum"
+
+    if not isinstance(reasons, list):
+        reasons = [reasons]
+
+    formatted = []
+    legacy_markers = ("post_score", "bio_pattern", "blue", "author_badge")
+
+    for reason in reasons:
+        reason_text = str(reason)
+        if any(marker in reason_text for marker in legacy_markers):
+            reason_text = f"{reason_text} [legado/telemetria; nao e criterio atual]"
+        formatted.append(reason_text)
+
+    return ", ".join(formatted)
 
 
 def format_age(timestamp):
@@ -341,7 +367,7 @@ def audit_watchlist(watchlist, config, warnings, criticals):
                 "social_last_checked": checked,
                 "tracked_posts": tracked_count,
                 "best_alert_rank": best_rank,
-                "best_social_score": social_value(token, "best_social_score"),
+                "post_metric_telemetry": social_value(token, "best_social_score"),
                 "last_alert_reason": social_value(token, "last_alert_reason"),
             })
 
@@ -722,12 +748,21 @@ def print_key_value(label, value):
 def print_config(config):
     print_section("1. Config")
     print_key_value("enabled", config.get("enabled"))
+    print_key_value("scoring_mode", config.get("scoring_mode"))
+    print_key_value("disable_post_metric_alerts", config.get("disable_post_metric_alerts"))
     print_key_value("monitoring_window_hours", config.get("monitoring_window_hours"))
     print_key_value("max_posts_per_token", config.get("max_posts_per_token"))
     print_key_value("cycle_interval_seconds", config.get("cycle_interval_seconds"))
     print_key_value("max_new_tokens_per_day", config.get("max_new_tokens_per_day"))
-    print("Alert thresholds:")
+    print_key_value("followers_alert_threshold", config.get("followers_alert_threshold"))
+    print("Alert rules legadas:")
     for key, value in (config.get("alert_rules") or {}).items():
+        print(f"- {key}: {value}")
+    print("Badges/origem:")
+    for key, value in (config.get("badges") or {}).items():
+        print(f"- {key}: {value}")
+    print("Automation/operator:")
+    for key, value in (config.get("automation") or {}).items():
         print(f"- {key}: {value}")
 
 
@@ -750,7 +785,7 @@ def print_watchlist(summary, limit):
             f"first={token['first_seen_at']} | last={token['last_seen_at']} | "
             f"social={token['social_started']} -> {token['social_expires']} | "
             f"checked={token['social_last_checked']} | tracked={token['tracked_posts']} | "
-            f"rank={token['best_alert_rank']} | score={token['best_social_score']} | "
+            f"origin_rank={token['best_alert_rank']} | post_metric_telemetry={token['post_metric_telemetry']} | "
             f"reason={token['last_alert_reason']}"
         )
 
@@ -810,14 +845,14 @@ def print_history(summary, limit):
     print_key_value("users_found total", summary["users_found_total"])
     print_key_value("alert_generated total", summary["alerts_generated_total"])
     print_key_value("tokens expirados", summary["tokens_expired"])
-    print(f"Distribuicao alert_rank: {summary['alert_rank_distribution']}")
+    print(f"Distribuicao origin alert_rank: {summary['alert_rank_distribution']}")
     print(f"Ultimos {limit} eventos:")
     for event in summary["latest_events"]:
         print(
             f"- {event.get('timestamp')} | {event.get('token_address')} | "
             f"posts={event.get('posts_found', event.get('posts_count'))} | "
             f"alert={event.get('alert_generated', event.get('alerts_generated'))} | "
-            f"rank={event.get('alert_rank')} | status_after={event.get('status_after')}"
+            f"origin_rank={event.get('alert_rank')} | status_after={event.get('status_after')}"
         )
 
 
@@ -825,7 +860,7 @@ def print_alerts(summary, watchlist):
     print_section("8. Alertas")
     print_key_value("Total acumulado", summary["total_accumulated"])
     print_key_value("Total do dia", summary["total_day"])
-    print(f"Alertas por rank: {summary['rank_counts']}")
+    print(f"Alertas por rank de origem/reputacao: {summary['rank_counts']}")
     print("Top tokens por quantidade de alertas:")
     for token, count in summary["top_tokens"]:
         print(f"- {token}: {count}")
@@ -834,8 +869,9 @@ def print_alerts(summary, watchlist):
         token = str(alert.get("token_address", "")).lower()
         wl_token = watchlist.get(token) if isinstance(watchlist.get(token), dict) else {}
         print(
-            f"- {alert.get('timestamp')} | {token} | rank={alert.get('alert_rank')} | "
-            f"reasons={alert.get('alert_reasons')} | best_score={alert.get('best_post_score')} | "
+            f"- {alert.get('timestamp')} | {token} | origin_rank={alert.get('alert_rank')} | "
+            f"reasons={format_alert_reasons(alert.get('alert_reasons'))} | "
+            f"post_metric_telemetry={alert.get('best_post_score')} | "
             f"followers={format_number(alert.get('best_author_followers'))} | "
             f"status={wl_token.get('status', 'indisponivel')} | {symbol_name(wl_token)}"
         )
@@ -918,6 +954,22 @@ def build_audit(args):
     config = load_simple_social_config(warnings)
     max_posts = int(config.get("max_posts_per_token") or 8)
     watchlist = load_json(WATCHLIST_FILE, default={}, warnings=warnings, criticals=criticals, critical=True)
+
+    if config.get("scoring_mode") == "origin_reputation":
+        oks.append("Config social em modo origin_reputation.")
+    else:
+        warnings.append(f"Config social_inference.scoring_mode inesperado: {config.get('scoring_mode')}")
+
+    if config.get("disable_post_metric_alerts") is True:
+        oks.append("Alertas por metrica de post desativados.")
+    else:
+        warnings.append("disable_post_metric_alerts nao esta true; conferir semantica do novo modelo.")
+
+    badges = config.get("badges") or {}
+    if badges.get("ignore_blue_as_alert") is True:
+        oks.append("Selo azul isolado esta ignorado como criterio de alerta.")
+    else:
+        warnings.append("ignore_blue_as_alert nao esta true; selo azul pode estar ambiguo.")
 
     if not isinstance(watchlist, dict):
         criticals.append("watchlist ausente ou invalida")

@@ -26,7 +26,7 @@ LATEST_SNAPSHOT_FILE = DATA_DIR / "token_scanner_latest.json"
 LATEST_RAW_PROFILES_FILE = DATA_DIR / "token_scanner_latest_profiles_raw.json"
 
 DEFAULT_CONFIG = {
-    "chain_id": "ethereum",
+    "chain_ids": ["ethereum", "base"],
     "watchlist_max_tokens": 10,
     "watchlist_infinite": True,
     "feed_disappearance_minutes": 60,
@@ -70,6 +70,7 @@ def parse_config_value(value):
 def load_simple_yaml_token_scanner(config_file):
     config = {}
     in_token_scanner = False
+    list_key = None
 
     for raw_line in config_file.read_text(encoding="utf-8").splitlines():
         line = raw_line.split("#", 1)[0].rstrip()
@@ -77,18 +78,38 @@ def load_simple_yaml_token_scanner(config_file):
         if not line:
             continue
 
+        stripped = line.strip()
+
         if line == "token_scanner:":
             in_token_scanner = True
+            list_key = None
             continue
 
         if not raw_line.startswith((" ", "\t")):
             in_token_scanner = False
+            list_key = None
 
-        if not in_token_scanner or ":" not in line:
+        if not in_token_scanner:
             continue
 
-        key, value = line.strip().split(":", 1)
-        config[key.strip()] = parse_config_value(value)
+        if stripped.startswith("- ") and list_key:
+            config.setdefault(list_key, []).append(parse_config_value(stripped[2:]))
+            continue
+
+        if ":" not in line:
+            continue
+
+        key, value = stripped.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+
+        if value == "":
+            config[key] = []
+            list_key = key
+            continue
+
+        config[key] = parse_config_value(value)
+        list_key = None
 
     return config
 
@@ -101,6 +122,12 @@ def load_config(config_file=CONFIG_FILE):
 
     loaded = load_simple_yaml_token_scanner(config_file)
     config.update({key: value for key, value in loaded.items() if value != ""})
+
+    if "chain_id" in loaded and "chain_ids" not in loaded:
+        config["chain_ids"] = [loaded["chain_id"]]
+    if isinstance(config.get("chain_ids"), str):
+        config["chain_ids"] = [config["chain_ids"]]
+
     return config
 
 
@@ -167,24 +194,28 @@ def fetch_latest_token_profiles():
     return response.json()
 
 
-def filter_latest_ethereum_profiles(tokens, chain_id):
+def filter_latest_evm_profiles(tokens, chain_ids):
     seen = set()
     filtered = []
+    allowed_chains = set(chain_ids)
 
     for token in tokens:
-        if token.get("chainId") != chain_id:
+        chain_id = token.get("chainId")
+
+        if chain_id not in allowed_chains:
             continue
 
         token_address = normalize_ethereum_address(token.get("tokenAddress"))
         if not token_address:
-            print(f"[IGNORADO] Endereco Ethereum invalido: {str(token.get('tokenAddress'))[:80]}")
+            print(f"[IGNORADO] Endereco EVM invalido: {str(token.get('tokenAddress'))[:80]}")
             continue
 
-        if token_address in seen:
+        token_key = f"{chain_id}:{token_address}"
+        if token_key in seen:
             continue
 
         token["tokenAddress"] = token_address
-        seen.add(token_address)
+        seen.add(token_key)
         filtered.append(token)
 
     return filtered
@@ -423,6 +454,13 @@ def print_summary(snapshot):
         f"Ciclo: {snapshot['generated_at']}",
         f"Tokens retornados: {counters['tokens_returned']}",
         f"Ethereum encontrados: {counters['ethereum_found']}",
+        f"Base encontrados: {counters['base_found']}",
+        f"Tokens alvo encontrados: {counters['target_chains_found']}",
+        "Tokens alvo por chain: "
+        + ", ".join(
+            f"{chain}={count}"
+            for chain, count in counters["target_chains_breakdown"].items()
+        ),
         "Chains encontradas: "
         + ", ".join(
             f"{chain}={count}"
@@ -463,13 +501,17 @@ def run_cycle(config_file=CONFIG_FILE):
         },
     )
 
-    chain_id = config["chain_id"]
+    chain_ids = config["chain_ids"]
     chains_found = dict(Counter(token.get("chainId", "unknown") for token in tokens))
-    ethereum_tokens = filter_latest_ethereum_profiles(tokens, chain_id)
+    target_tokens = filter_latest_evm_profiles(tokens, chain_ids)
+    target_chains_found = dict(Counter(token.get("chainId", "unknown") for token in target_tokens))
 
     counters = {
         "tokens_returned": len(tokens),
-        "ethereum_found": len(ethereum_tokens),
+        "ethereum_found": target_chains_found.get("ethereum", 0),
+        "base_found": target_chains_found.get("base", 0),
+        "target_chains_found": len(target_tokens),
+        "target_chains_breakdown": target_chains_found,
         "chains_found": chains_found,
         "new_added": 0,
         "updated": 0,
@@ -480,7 +522,8 @@ def run_cycle(config_file=CONFIG_FILE):
     }
     seen_addresses = set()
 
-    for token in ethereum_tokens:
+    for token in target_tokens:
+        chain_id = token.get("chainId")
         token_address = normalize_ethereum_address(token.get("tokenAddress"))
         if not token_address:
             continue

@@ -13,7 +13,9 @@ from requests import HTTPError
 
 
 X_SEARCH_RECENT_URL = "https://api.x.com/2/tweets/search/recent"
+X_USER_BY_USERNAME_URL = "https://api.x.com/2/users/by/username/{username}"
 SOCIAL_INFERENCE_VERSION = "krptov-social-inference-v1-x-ca-monitor-2026-05-22"
+X_USER_FIELDS = "username,name,description,created_at,verified,verified_type,is_identity_verified,affiliation,public_metrics,protected,parody,url"
 
 STATUS_NOVO = "novo"
 STATUS_ATIVO = "ativo"
@@ -32,49 +34,34 @@ POSTS_DIR = DATA_DIR / "social_posts"
 
 DEFAULT_CONFIG = {
     "enabled": True,
+    "scoring_mode": "origin_reputation",
+    "disable_post_metric_alerts": True,
     "monitoring_window_hours": 22,
     "max_posts_per_token": 8,
     "cycle_interval_seconds": 180,
     "max_new_tokens_per_day": 30,
-    "alert_rules": {
-        "alert_on_any_affiliation": True,
-        "min_followers_to_alert": 20000,
-        "min_post_score_to_alert": 60,
-        "min_bio_pattern_hits_to_alert": 1,
+    "followers_alert_threshold": 2000,
+    "badges": {
+        "alert_on_affiliation": True,
+        "alert_on_verified_business": True,
+        "alert_on_verified_government": True,
+        "ignore_blue_as_alert": True,
+    },
+    "automation": {
+        "enabled": True,
+        "detect_operator": True,
+        "analyze_operator_profile": True,
+        "operator_patterns": [
+            "automatizado por @",
+            "automated by @",
+            "bot by @",
+        ],
     },
     "author_followers_thresholds": {
-        "medium": 5000,
+        "medium": 2000,
         "high": 20000,
         "critical": 100000,
     },
-    "post_metric_weights": {
-        "like_count": 3,
-        "reply_count": 4,
-        "retweet_count": 5,
-        "quote_count": 4,
-        "bookmark_count": 2,
-        "impression_count": 0,
-    },
-    "post_score": {
-        "divisor": 1,
-        "max_score": 1000000,
-    },
-    "bio_patterns": [
-        "coinbase",
-        "@coinbase",
-        "base",
-        "@base",
-        "ethereum",
-        ".eth",
-        "founder",
-        "co-founder",
-        "ceo",
-        "cto",
-        "engineer",
-        "researcher",
-        "protocol",
-        "core contributor",
-    ],
 }
 
 
@@ -302,7 +289,7 @@ def search_token_mentions(token_address, bearer_token, max_results):
         "max_results": api_max_results,
         "tweet.fields": "author_id,created_at,public_metrics,text",
         "expansions": "author_id",
-        "user.fields": "username,name,description,created_at,verified,verified_type,is_identity_verified,affiliation,public_metrics,protected,parody,url",
+        "user.fields": X_USER_FIELDS,
     }
     response = requests.get(
         X_SEARCH_RECENT_URL,
@@ -312,6 +299,23 @@ def search_token_mentions(token_address, bearer_token, max_results):
     )
     response.raise_for_status()
     return response.json()
+
+
+def fetch_user_by_username(username, bearer_token):
+    headers = {
+        "Authorization": f"Bearer {bearer_token}",
+    }
+    params = {
+        "user.fields": X_USER_FIELDS,
+    }
+    response = requests.get(
+        X_USER_BY_USERNAME_URL.format(username=username),
+        headers=headers,
+        params=params,
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json().get("data")
 
 
 def save_x_error(response, token_address, current_time):
@@ -405,6 +409,23 @@ def get_affiliation(user):
     return affiliation or None
 
 
+def get_author_badge(user):
+    if get_affiliation(user):
+        return "affiliation"
+
+    verified_type = user.get("verified_type")
+    if verified_type:
+        return verified_type
+
+    if user.get("is_identity_verified") is True:
+        return "identity_verified"
+
+    if user.get("verified") is True:
+        return "blue"
+
+    return None
+
+
 def get_followers_count(user):
     metrics = user.get("public_metrics") or {}
     return int(metrics.get("followers_count") or 0)
@@ -414,58 +435,208 @@ def follower_rank(followers_count, config):
     thresholds = config["author_followers_thresholds"]
 
     if followers_count >= int(thresholds["critical"]):
-        return 80, "critical"
+        return 60, "critical"
     if followers_count >= int(thresholds["high"]):
-        return 60, "high"
+        return 40, "high"
     if followers_count >= int(thresholds["medium"]):
-        return 40, "medium"
+        return 20, "medium"
 
     return 0, None
 
 
-def build_social_analysis(response_payload, config):
+def badge_rank(user, config):
+    badges = config["badges"]
+
+    if get_affiliation(user) and badges.get("alert_on_affiliation", True):
+        return 100, "affiliation_found"
+
+    verified_type = user.get("verified_type")
+    if verified_type == "business" and badges.get("alert_on_verified_business", True):
+        return 90, "verified_type_business"
+    if verified_type == "government" and badges.get("alert_on_verified_government", True):
+        return 85, "verified_type_government"
+
+    return 0, None
+
+
+def relevant_profile_signal(user, config, prefix):
+    followers_count = get_followers_count(user)
+    rank = 0
+    reasons = []
+
+    badge_signal_rank, badge_reason = badge_rank(user, config)
+    if badge_signal_rank:
+        rank = max(rank, badge_signal_rank)
+        reasons.append(f"{prefix}_{badge_reason}")
+
+    follower_signal_rank, follower_band = follower_rank(followers_count, config)
+    if followers_count >= int(config["followers_alert_threshold"]):
+        rank = max(rank, follower_signal_rank)
+        reasons.append(f"{prefix}_followers_{follower_band}>={followers_count}")
+
+    return rank, reasons
+
+
+def normalize_username(value):
+    if not value:
+        return None
+
+    username = str(value).strip().lstrip("@")
+    username = re.sub(r"[^A-Za-z0-9_].*$", "", username)
+
+    if not username:
+        return None
+
+    return username
+
+
+def get_structured_automation_operator(user):
+    for key in ["automated_by", "automation", "automated", "bot_operator", "operator"]:
+        value = user.get(key)
+
+        if isinstance(value, dict):
+            username = (
+                value.get("username")
+                or value.get("screen_name")
+                or value.get("handle")
+            )
+            if username:
+                return normalize_username(username)
+
+        if isinstance(value, str) and "@" in value:
+            match = re.search(r"@([A-Za-z0-9_]{1,15})", value)
+            if match:
+                return normalize_username(match.group(1))
+
+    return None
+
+
+def get_fallback_automation_operator(user, config):
+    text = " ".join(
+        str(user.get(key) or "")
+        for key in ["description", "name"]
+    )
+    normalized = text.lower()
+
+    for pattern in config["automation"].get("operator_patterns", []):
+        pattern_index = normalized.find(pattern.lower())
+        if pattern_index < 0:
+            continue
+
+        candidate = text[pattern_index + len(pattern):]
+        match = re.search(r"@?([A-Za-z0-9_]{1,15})", candidate)
+        if match:
+            return normalize_username(match.group(1))
+
+    return None
+
+
+def get_automation_operator_username(user, config):
+    structured = get_structured_automation_operator(user)
+    if structured:
+        return structured
+
+    return get_fallback_automation_operator(user, config)
+
+
+def empty_origin_summary(origin_type="unknown"):
+    return {
+        "origin_type": origin_type,
+        "author_username": None,
+        "author_followers": 0,
+        "author_verified": False,
+        "author_verified_type": None,
+        "author_affiliation_found": False,
+        "automated_operator_detected": False,
+        "automated_operator_username": None,
+        "operator_followers": None,
+        "operator_verified": None,
+        "operator_verified_type": None,
+        "operator_affiliation_found": None,
+    }
+
+
+def build_origin_summary(user, operator_user=None):
+    summary = {
+        "origin_type": "automated" if operator_user else "human",
+        "author_username": user.get("username"),
+        "author_followers": get_followers_count(user),
+        "author_verified": bool(user.get("verified")),
+        "author_verified_type": user.get("verified_type"),
+        "author_affiliation_found": bool(get_affiliation(user)),
+        "automated_operator_detected": operator_user is not None,
+        "automated_operator_username": None,
+        "operator_followers": None,
+        "operator_verified": None,
+        "operator_verified_type": None,
+        "operator_affiliation_found": None,
+    }
+
+    if operator_user:
+        summary["automated_operator_username"] = operator_user.get("username")
+        summary["operator_followers"] = get_followers_count(operator_user)
+        summary["operator_verified"] = bool(operator_user.get("verified"))
+        summary["operator_verified_type"] = operator_user.get("verified_type")
+        summary["operator_affiliation_found"] = bool(get_affiliation(operator_user))
+
+    return summary
+
+
+def build_social_analysis(response_payload, config, bearer_token=None):
     tweets = response_payload.get("data") or []
     users = response_payload.get("includes", {}).get("users", [])
 
-    alert_rules = config["alert_rules"]
     users_by_id = {user.get("id"): user for user in users}
-    all_bio_patterns = set()
     alert_reasons = []
     alert_rank = 0
     best_post_score = 0
     best_author_followers = 0
-    affiliation_found = False
+    origin_summary = empty_origin_summary()
 
     for tweet in tweets:
-        score = calculate_post_score(tweet, config)
-        tweet["krptov_post_score"] = score
         tweet["krptov_engagement_rate"] = calculate_engagement_rate(tweet)
-        best_post_score = max(best_post_score, score)
-
-        if score >= int(alert_rules["min_post_score_to_alert"]):
-            alert_rank = max(alert_rank, 30)
-            alert_reasons.append(f"post_score>={alert_rules['min_post_score_to_alert']}")
 
     for user in users:
         followers_count = get_followers_count(user)
         best_author_followers = max(best_author_followers, followers_count)
 
-        affiliation = get_affiliation(user)
-        if affiliation and alert_rules["alert_on_any_affiliation"]:
-            affiliation_found = True
-            alert_rank = max(alert_rank, 100)
-            alert_reasons.append("author_affiliation_found")
+        user_rank, user_reasons = relevant_profile_signal(user, config, "author")
+        if user_rank > alert_rank:
+            origin_summary = build_origin_summary(user)
+        alert_rank = max(alert_rank, user_rank)
+        alert_reasons.extend(user_reasons)
 
-        rank, follower_band = follower_rank(followers_count, config)
-        if followers_count >= int(alert_rules["min_followers_to_alert"]):
-            alert_rank = max(alert_rank, rank)
-            alert_reasons.append(f"followers_{follower_band}>={followers_count}")
+        operator_user = None
+        operator_username = None
+        if config["automation"].get("enabled", True) and config["automation"].get("detect_operator", True):
+            operator_username = get_automation_operator_username(user, config)
 
-        user_patterns = find_bio_patterns(user.get("description"), config["bio_patterns"])
-        if len(user_patterns) >= int(alert_rules["min_bio_pattern_hits_to_alert"]):
-            all_bio_patterns.update(user_patterns)
-            alert_rank = max(alert_rank, 20)
-            alert_reasons.append("bio_pattern_found:" + ",".join(user_patterns))
+        if (
+            operator_username
+            and bearer_token
+            and config["automation"].get("analyze_operator_profile", True)
+        ):
+            try:
+                operator_user = fetch_user_by_username(operator_username, bearer_token)
+            except Exception:
+                operator_user = {"username": operator_username}
+
+        if operator_username and operator_user is None:
+            operator_user = {"username": operator_username}
+
+        if operator_user:
+            operator_rank, operator_reasons = relevant_profile_signal(operator_user, config, "operator")
+            if operator_rank:
+                operator_rank = 80
+                operator_reasons.append("automated_operator_relevant")
+
+            if operator_rank > alert_rank:
+                origin_summary = build_origin_summary(user, operator_user)
+            elif origin_summary["author_username"] == user.get("username"):
+                origin_summary.update(build_origin_summary(user, operator_user))
+
+            alert_rank = max(alert_rank, operator_rank)
+            alert_reasons.extend(operator_reasons)
 
     alert_signature = None
     if alert_rank > 0:
@@ -479,8 +650,10 @@ def build_social_analysis(response_payload, config):
         "users_found": len(users),
         "best_post_score": best_post_score,
         "best_author_followers": best_author_followers,
-        "affiliation_found": affiliation_found,
-        "bio_patterns_found": sorted(all_bio_patterns),
+        "author_badge_found": origin_summary["author_verified_type"] in ["business", "government"],
+        "affiliation_found": origin_summary["author_affiliation_found"],
+        "bio_patterns_found": [],
+        "origin_summary": origin_summary,
         "alert_rank": alert_rank,
         "alert_reasons": sorted(set(alert_reasons)),
         "alert_signature": alert_signature,
@@ -557,18 +730,34 @@ def expire_social_monitoring(entry, current_time):
 
 
 def build_alert(token_address, entry, analysis, current_time, status_before):
+    origin = analysis["origin_summary"]
+
     return {
         "timestamp": to_iso(current_time),
         "token_address": token_address,
         "status_before": status_before,
         "status_after": entry.get("status"),
         "alert_rank": analysis["alert_rank"],
+        "alert_reason": analysis["alert_signature"],
         "alert_signature": analysis["alert_signature"],
         "alert_reasons": analysis["alert_reasons"],
         "best_post_score": analysis["best_post_score"],
         "best_author_followers": analysis["best_author_followers"],
+        "author_badge_found": analysis["author_badge_found"],
         "affiliation_found": analysis["affiliation_found"],
         "bio_patterns_found": analysis["bio_patterns_found"],
+        "origin_type": origin["origin_type"],
+        "author_username": origin["author_username"],
+        "author_followers": origin["author_followers"],
+        "author_verified": origin["author_verified"],
+        "author_verified_type": origin["author_verified_type"],
+        "author_affiliation_found": origin["author_affiliation_found"],
+        "automated_operator_detected": origin["automated_operator_detected"],
+        "automated_operator_username": origin["automated_operator_username"],
+        "operator_followers": origin["operator_followers"],
+        "operator_verified": origin["operator_verified"],
+        "operator_verified_type": origin["operator_verified_type"],
+        "operator_affiliation_found": origin["operator_affiliation_found"],
         "social_monitoring_started_at": entry.get("social_monitoring_started_at"),
         "social_monitoring_expires_at": entry.get("social_monitoring_expires_at"),
         "telegram_alert_sent": True,
@@ -658,6 +847,8 @@ def apply_alert(entry, analysis, current_time):
 
 
 def build_history_record(token_address, status_before, entry, analysis, alert_generated, current_time):
+    origin = analysis["origin_summary"]
+
     return {
         "timestamp": to_iso(current_time),
         "token_address": token_address,
@@ -667,8 +858,21 @@ def build_history_record(token_address, status_before, entry, analysis, alert_ge
         "users_found": analysis["users_found"],
         "best_post_score": analysis["best_post_score"],
         "best_author_followers": analysis["best_author_followers"],
+        "author_badge_found": analysis["author_badge_found"],
         "affiliation_found": analysis["affiliation_found"],
         "bio_patterns_found": analysis["bio_patterns_found"],
+        "origin_type": origin["origin_type"],
+        "author_username": origin["author_username"],
+        "author_followers": origin["author_followers"],
+        "author_verified": origin["author_verified"],
+        "author_verified_type": origin["author_verified_type"],
+        "author_affiliation_found": origin["author_affiliation_found"],
+        "automated_operator_detected": origin["automated_operator_detected"],
+        "automated_operator_username": origin["automated_operator_username"],
+        "operator_followers": origin["operator_followers"],
+        "operator_verified": origin["operator_verified"],
+        "operator_verified_type": origin["operator_verified_type"],
+        "operator_affiliation_found": origin["operator_affiliation_found"],
         "alert_generated": alert_generated,
         "alert_rank": analysis["alert_rank"],
         "alert_reasons": analysis["alert_reasons"],
@@ -724,8 +928,10 @@ def empty_analysis():
         "users_found": 0,
         "best_post_score": 0,
         "best_author_followers": 0,
+        "author_badge_found": False,
         "affiliation_found": False,
         "bio_patterns_found": [],
+        "origin_summary": empty_origin_summary(),
         "alert_rank": 0,
         "alert_reasons": [],
     }
@@ -867,7 +1073,7 @@ def run_cycle(config_file=CONFIG_FILE):
                 entry["social_total_posts_seen"] = len(tracked_tweet_ids)
 
             analysis_payload = filter_response_to_tracked_posts(response_payload, tracked_tweet_ids)
-            analysis = build_social_analysis(analysis_payload, config)
+            analysis = build_social_analysis(analysis_payload, config, bearer_token=bearer_token)
             tokens_checked += 1
             latest_tweet_id = get_latest_tweet_id(analysis["tweets"])
             if latest_tweet_id:

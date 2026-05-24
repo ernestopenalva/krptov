@@ -199,6 +199,22 @@ def get_reason_values(tweet):
     return []
 
 
+def format_alert_reasons(reasons):
+    if not reasons:
+        return "indisponivel"
+
+    formatted = []
+    legacy_markers = ("post_score", "bio_pattern", "blue", "author_badge")
+
+    for reason in reasons:
+        reason_text = str(reason)
+        if any(marker in reason_text for marker in legacy_markers):
+            reason_text = f"{reason_text} [legado/telemetria; nao e criterio atual]"
+        formatted.append(reason_text)
+
+    return ", ".join(formatted)
+
+
 def get_alert_for_token(token_address):
     if not token_address:
         return None
@@ -246,10 +262,9 @@ def build_summary(tweets, users_by_id, returned_posts=None, tracked_posts=None, 
     scored_tweets.sort(key=lambda item: item[0], reverse=True)
 
     best_score = scored_tweets[0][0] if scored_tweets else None
-    best_tweet = scored_tweets[0][1] if scored_tweets else {}
     alert_rank = None
-    alert = best_score is not None and best_score > 0
-    reasons = get_reason_values(best_tweet)
+    alert = False
+    reasons = []
 
     if alert_context:
         alert_score = alert_context.get("best_post_score")
@@ -268,19 +283,6 @@ def build_summary(tweets, users_by_id, returned_posts=None, tracked_posts=None, 
         if alert_reasons:
             reasons = [str(reason) for reason in alert_reasons]
 
-    if alert and not reasons:
-        best_author = users_by_id.get(best_tweet.get("author_id"), {})
-        followers = best_author.get("public_metrics", {}).get("followers_count", 0)
-
-        try:
-            followers = int(followers)
-        except (TypeError, ValueError):
-            followers = 0
-
-        if followers >= 10000:
-            reasons.append("followers_high")
-        reasons.append("post_score")
-
     return {
         "returned_posts": returned_posts,
         "tracked_posts": tracked_posts,
@@ -295,20 +297,22 @@ def build_summary(tweets, users_by_id, returned_posts=None, tracked_posts=None, 
 
 def print_summary(summary):
     top_username = summary["top_author"].get("username", "unknown")
-    reasons = ", ".join(summary["reasons"]) if summary["reasons"] else "indisponivel"
+    reasons = format_alert_reasons(summary["reasons"])
 
     print("Resumo:")
     print(f"- Tracked posts: {summary['tracked_posts']} de {summary['returned_posts']} retornados")
     print(f"- Maior autor: @{top_username}, {format_metric(summary['top_followers'])} followers")
-    print(f"- Melhor post_score: {format_score(summary['best_score'])}")
+
+    if summary["best_score"] is not None:
+        print(f"- Telemetria de post legado: {format_score(summary['best_score'])}")
 
     if summary["alert"]:
         rank = summary["alert_rank"] if summary["alert_rank"] is not None else summary["best_score"]
-        print(f"- Alerta: sim, rank {format_score(rank)}")
+        print(f"- Alerta registrado: sim, rank {format_score(rank)}")
     else:
-        print("- Alerta: nao")
+        print("- Alerta registrado: nao")
 
-    print(f"- Motivos: {reasons}")
+    print(f"- Motivos de origem/reputacao: {reasons}")
     print()
 
 
@@ -325,10 +329,10 @@ def print_user(author):
 
     print(f"User: @{username}")
     print(f"Name: {name}")
-    print(f"Verified: {verified}")
+    print(f"Verified context: {verified}")
 
     if verified_type:
-        print(f"Verified type: {verified_type}")
+        print(f"Verified type context: {verified_type}")
 
     print(f"Followers: {format_metric(followers)}")
 
@@ -336,10 +340,10 @@ def print_user(author):
         print(f"User created at: {user_created_at}")
 
     if affiliation:
-        print(f"Affiliation: {affiliation}")
+        print(f"Affiliation context: {affiliation}")
 
     if description:
-        print(f"Description: {short_text(description)}")
+        print(f"Description context: {short_text(description)}")
 
 
 def print_post(tweet, author):
@@ -355,7 +359,7 @@ def print_post(tweet, author):
     print(f"Created at: {created_at}")
 
     if score is not None:
-        print(f"KRPTO-V post score: {score}")
+        print(f"Post metric telemetry (legacy): {score}")
 
     print(
         "Tweet metrics: "

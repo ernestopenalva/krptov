@@ -178,6 +178,16 @@ def format_list(values):
     return str(values)
 
 
+def format_alert_reason(reason):
+    reason = str(reason)
+    legacy_markers = ("post_score", "bio_pattern", "blue", "author_badge")
+
+    if any(marker in reason for marker in legacy_markers):
+        return f"{reason} [legado/telemetria; nao e criterio atual]"
+
+    return reason
+
+
 def short_address(value):
     if not value:
         return "indisponivel"
@@ -299,14 +309,14 @@ def print_header(source, total_loaded, total_showing, warnings):
 
 
 def print_reasons(reasons):
-    print("Motivos:")
+    print("Motivos de origem/reputacao:")
 
     if not reasons:
         print("- nenhum")
         return
 
     for reason in reasons:
-        print(f"- {reason}")
+        print(f"- {format_alert_reason(reason)}")
 
 
 def print_watchlist_details(alert, watch_token):
@@ -325,27 +335,33 @@ def print_watchlist_details(alert, watch_token):
     print(f"FDV: {format_money(metrics.get('fdv'))}")
     print(f"Price change h1: {format_number(metrics.get('price_change_h1'), 2)}%")
     print(f"Social last checked at: {social.get('social_last_checked_at', 'indisponivel')}")
-    print(f"Best social score: {social.get('best_social_score', 'indisponivel')}")
-    print(f"Best alert rank: {social.get('best_alert_rank', 'indisponivel')}")
+    print(f"Post metric telemetry legado: {social.get('best_social_score', 'indisponivel')}")
+    print(f"Best origin alert rank: {social.get('best_alert_rank', 'indisponivel')}")
     print(f"Tracked posts: {social.get('social_tracked_posts_count', 'indisponivel')}")
     print(f"Posts file: {relative_path(posts_file)}")
 
 
 def print_alert(index, alert, watch_token, show_watchlist):
     reasons = alert.get("alert_reasons") or []
-    bio_patterns = alert.get("bio_patterns_found") or []
 
     print("-" * 80)
     print(f"[{index}] {alert.get('timestamp', 'indisponivel')}")
     print(f"Token: {alert.get('token_address', 'indisponivel')}")
     print(f"Status: {alert.get('status_before', 'indisponivel')} -> {alert.get('status_after', 'indisponivel')}")
-    print(f"Rank: {alert.get('alert_rank', 'indisponivel')}")
+    print(f"Rank origem/reputacao: {alert.get('alert_rank', 'indisponivel')}")
     print_reasons(reasons)
     print()
-    print(f"Best post score: {alert.get('best_post_score', 'indisponivel')}")
     print(f"Best author followers: {format_number(alert.get('best_author_followers'))}")
-    print(f"Affiliation: {format_bool(alert.get('affiliation_found'))}")
-    print(f"Bio patterns: {format_list(bio_patterns)}")
+    print(f"Origin type: {alert.get('origin_type', 'indisponivel')}")
+    print(f"Author: @{alert.get('author_username', 'indisponivel')}")
+    print(f"Author followers: {format_number(alert.get('author_followers'))}")
+    print(f"Author verified: {format_bool(alert.get('author_verified'))}")
+    print(f"Author verified type: {alert.get('author_verified_type', 'indisponivel')}")
+    print(f"Author affiliation: {format_bool(alert.get('author_affiliation_found'))}")
+    print(f"Automated operator: {alert.get('automated_operator_username', 'nenhum')}")
+    print(f"Operator followers: {format_number(alert.get('operator_followers'))}")
+    print(f"Operator verified type: {alert.get('operator_verified_type', 'indisponivel')}")
+    print(f"Operator affiliation: {format_bool(alert.get('operator_affiliation_found'))}")
     print(
         "Janela social: "
         f"{alert.get('social_monitoring_started_at', 'indisponivel')} -> "
@@ -362,14 +378,15 @@ def print_alert(index, alert, watch_token, show_watchlist):
 def print_compact_alert(alert, watch_token):
     symbol = token_symbol(watch_token) if watch_token else None
     status = watch_token.get("status") if watch_token else alert.get("status_after")
-    reasons = format_list(alert.get("alert_reasons") or [])
+    reasons = format_list([format_alert_reason(reason) for reason in (alert.get("alert_reasons") or [])])
     timestamp = alert.get("timestamp", "indisponivel")
     rank = alert.get("alert_rank", "indisponivel")
     token_address = short_address(alert.get("token_address"))
+    origin = alert.get("origin_type", "indisponivel")
 
     print(
         f"{timestamp} | rank={rank} | {symbol or 'indisponivel'} | "
-        f"{token_address} | {reasons} | status={status or 'indisponivel'}"
+        f"{token_address} | {origin} | {reasons} | status={status or 'indisponivel'}"
     )
 
 
