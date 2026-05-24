@@ -26,6 +26,7 @@ DEFAULT_CONFIG = {
     "cycle_interval_seconds": 180,
     "max_new_tokens_per_day": None,
     "followers_alert_threshold": None,
+    "excluded_author_usernames": [],
     "alert_rules": {},
     "badges": {},
     "automation": {},
@@ -144,6 +145,7 @@ def load_simple_social_config(warnings):
 
     in_social = False
     nested_section = None
+    current_list_key = None
 
     for raw_line in CONFIG_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
         no_comment = raw_line.split("#", 1)[0].rstrip()
@@ -157,17 +159,24 @@ def load_simple_social_config(warnings):
         if indent == 0:
             in_social = stripped == "social_inference:"
             nested_section = None
+            current_list_key = None
             continue
 
         if not in_social:
             continue
 
+        if current_list_key and indent >= 4 and stripped.startswith("- "):
+            config[current_list_key].append(parse_scalar(stripped[2:].strip()))
+            continue
+
         if indent == 2 and stripped in ("alert_rules:", "badges:", "automation:"):
             nested_section = stripped[:-1]
+            current_list_key = None
             continue
 
         if indent == 2:
             nested_section = None
+            current_list_key = None
 
         if ":" not in stripped:
             continue
@@ -175,6 +184,11 @@ def load_simple_social_config(warnings):
         key, value = stripped.split(":", 1)
         key = key.strip()
         value = value.strip()
+
+        if value == "" and key == "excluded_author_usernames":
+            config[key] = []
+            current_list_key = key
+            continue
 
         if value == "":
             continue
@@ -200,6 +214,93 @@ def get_nested(data, keys, default=None):
             return default
 
     return current
+
+
+def normalize_address(value):
+    if not value:
+        return None
+
+    value = str(value).strip().lower()
+    if value.startswith("0x") and len(value) == 42:
+        return value
+
+    return value
+
+
+def split_watchlist_key(key):
+    if not key:
+        return None, None
+
+    key = str(key)
+    if ":" not in key:
+        return None, normalize_address(key)
+
+    chain_id, token_address = key.split(":", 1)
+    return chain_id or None, normalize_address(token_address)
+
+
+def entry_token_address(key, entry):
+    if isinstance(entry, dict) and entry.get("token_address"):
+        return normalize_address(entry.get("token_address"))
+
+    _, token_address = split_watchlist_key(key)
+    return token_address
+
+
+def entry_chain_id(key, entry):
+    if isinstance(entry, dict) and entry.get("chain_id"):
+        return str(entry.get("chain_id"))
+
+    chain_id, _ = split_watchlist_key(key)
+    return chain_id or "unknown"
+
+
+def entry_watchlist_key(key, entry):
+    if isinstance(entry, dict) and entry.get("watchlist_key"):
+        return str(entry.get("watchlist_key"))
+
+    token_address = entry_token_address(key, entry)
+    chain_id = entry_chain_id(key, entry)
+
+    if token_address and chain_id and chain_id != "unknown":
+        return f"{chain_id}:{token_address}"
+
+    return str(key) if key else None
+
+
+def find_watchlist_entry(watchlist, token_address, chain_id=None, watchlist_key=None):
+    token_address = normalize_address(token_address)
+    chain_id = str(chain_id) if chain_id else None
+
+    if watchlist_key:
+        entry = watchlist.get(watchlist_key)
+        if isinstance(entry, dict):
+            return watchlist_key, entry
+
+    if token_address and chain_id:
+        exact_key = f"{chain_id}:{token_address}"
+        entry = watchlist.get(exact_key)
+        if isinstance(entry, dict):
+            return exact_key, entry
+
+    for key, entry in watchlist.items():
+        if not isinstance(entry, dict):
+            continue
+
+        if token_address and entry_token_address(key, entry) != token_address:
+            continue
+
+        if chain_id and entry_chain_id(key, entry) != chain_id:
+            continue
+
+        return key, entry
+
+    if token_address:
+        entry = watchlist.get(token_address)
+        if isinstance(entry, dict):
+            return token_address, entry
+
+    return None, None
 
 
 def format_number(value, decimals=0):
@@ -291,6 +392,27 @@ def token_chain(token):
     )
 
 
+def token_created_at(token):
+    return (
+        token.get("token_created_at")
+        or get_nested(token, ["selected_pair", "pairCreatedAt"])
+        or token.get("first_seen_at")
+    )
+
+
+def alert_chain_id(alert):
+    return alert.get("chain_id") or split_watchlist_key(alert.get("watchlist_key"))[0] or "unknown"
+
+
+def parse_posts_filename(path):
+    stem = path.stem
+    if "_" not in stem:
+        return None, normalize_address(stem), True
+
+    chain_id, token_address = stem.split("_", 1)
+    return chain_id or None, normalize_address(token_address), False
+
+
 def social_value(token, key, default=None):
     social = token.get("social")
 
@@ -330,17 +452,36 @@ def audit_watchlist(watchlist, config, warnings, criticals):
         "active_tokens": active_tokens,
     }
 
-    for address, token in watchlist.items():
+    entries_missing_chain = 0
+    entries_missing_address = 0
+    entries_missing_key = 0
+    status_by_chain = defaultdict(Counter)
+
+    for key, token in watchlist.items():
         if not isinstance(token, dict):
-            warnings.append(f"Token invalido na watchlist: {address}")
+            warnings.append(f"Token invalido na watchlist: {key}")
             continue
 
         status = token.get("status", "outros") or "outros"
         reason = token.get("status_reason")
-        chain_id = token_chain(token) or "indisponivel"
+        address = entry_token_address(key, token)
+        chain_id = entry_chain_id(key, token)
+        wl_key = entry_watchlist_key(key, token)
+
+        if not token.get("chain_id"):
+            entries_missing_chain += 1
+            warnings.append(f"Watchlist entry sem chain_id: {wl_key or key}")
+        if not token.get("token_address"):
+            entries_missing_address += 1
+            warnings.append(f"Watchlist entry sem token_address: {wl_key or key}")
+        if not token.get("watchlist_key"):
+            entries_missing_key += 1
+            warnings.append(f"Watchlist entry sem watchlist_key: {wl_key or key}")
+
         status_counts[status] += 1
         reason_counts[str(reason)] += 1
         summary["chain_counts"][chain_id] += 1
+        status_by_chain[chain_id][status] += 1
 
         started = social_value(token, "social_monitoring_started_at")
         expires = social_value(token, "social_monitoring_expires_at")
@@ -372,11 +513,14 @@ def audit_watchlist(watchlist, config, warnings, criticals):
 
         if status == "ativo":
             active_tokens.append({
+                "watchlist_key": wl_key,
                 "address": address,
                 "chain_id": chain_id,
                 "symbol_name": symbol_name(token),
                 "first_seen_at": token.get("first_seen_at"),
                 "last_seen_at": token.get("last_seen_at"),
+                "token_created_at": token.get("token_created_at"),
+                "token_created_at_source": token.get("token_created_at_source"),
                 "social_started": started,
                 "social_expires": expires,
                 "social_last_checked": checked,
@@ -387,26 +531,31 @@ def audit_watchlist(watchlist, config, warnings, criticals):
             })
 
         if status == "ativo" and (not started or not expires):
-            warnings.append(f"Ativo sem janela social: {address}")
+            warnings.append(f"Ativo sem janela social: {wl_key or address}")
 
         expire_at = parse_iso(expires)
         if status == "ativo" and expire_at and now_local() >= expire_at:
-            criticals.append(f"Ativo expirado ainda nao descartado: {address}")
+            criticals.append(f"Ativo expirado ainda nao descartado: {wl_key or address}")
 
         if status == "descarte" and reason == "social_timeout" and not social_value(token, "social_monitoring_completed_at"):
-            warnings.append(f"Descarte/social_timeout sem completed_at: {address}")
+            warnings.append(f"Descarte/social_timeout sem completed_at: {wl_key or address}")
 
         if status == "ativo" and not checked:
-            warnings.append(f"Ativo sem social_last_checked_at: {address}")
+            warnings.append(f"Ativo sem social_last_checked_at: {wl_key or address}")
 
         if tracked_count_num > max_posts:
-            criticals.append(f"social_tracked_posts_count acima do limite ({tracked_count_num}>{max_posts}): {address}")
+            criticals.append(f"social_tracked_posts_count acima do limite ({tracked_count_num}>{max_posts}): {wl_key or address}")
 
         if isinstance(tracked_ids, list) and len(tracked_ids) > max_posts:
-            criticals.append(f"social_tracked_tweet_ids acima do limite ({len(tracked_ids)}>{max_posts}): {address}")
+            criticals.append(f"social_tracked_tweet_ids acima do limite ({len(tracked_ids)}>{max_posts}): {wl_key or address}")
 
         if best_rank is not None and not social_value(token, "last_alert_at"):
-            warnings.append(f"Token com best_alert_rank mas sem last_alert_at: {address}")
+            warnings.append(f"Token com best_alert_rank mas sem last_alert_at: {wl_key or address}")
+
+    summary["status_by_chain"] = {chain: dict(counter) for chain, counter in status_by_chain.items()}
+    summary["entries_missing_chain_id"] = entries_missing_chain
+    summary["entries_missing_token_address"] = entries_missing_address
+    summary["entries_missing_watchlist_key"] = entries_missing_key
 
     return summary
 
@@ -420,6 +569,9 @@ def scanner_latest_summary(warnings):
         "generated_at": data.get("generated_at"),
         "tokens_returned": counters.get("tokens_returned"),
         "ethereum_found": counters.get("ethereum_found"),
+        "base_found": counters.get("base_found"),
+        "target_chains_found": counters.get("target_chains_found"),
+        "target_chains_breakdown": counters.get("target_chains_breakdown"),
         "new_added": counters.get("new_added"),
         "updated": counters.get("updated"),
         "ignored_discarded": counters.get("ignored_discarded"),
@@ -453,6 +605,15 @@ def usage_summary(date, config, warnings):
     max_daily = data.get("max_new_tokens_per_day") or config.get("max_new_tokens_per_day")
     started = data.get("new_tokens_started", 0)
     tokens_started = data.get("tokens_started") or data.get("tokens_started_recent") or []
+    started_by_chain = Counter()
+
+    if isinstance(tokens_started, list):
+        for item in tokens_started:
+            if isinstance(item, dict):
+                chain_id = item.get("chain_id") or split_watchlist_key(item.get("watchlist_key"))[0] or "unknown"
+            else:
+                chain_id = split_watchlist_key(str(item))[0] or "unknown"
+            started_by_chain[chain_id] += 1
 
     try:
         percent = float(started) / float(max_daily) * 100 if max_daily else None
@@ -465,6 +626,7 @@ def usage_summary(date, config, warnings):
         "max_new_tokens_per_day": max_daily,
         "percent_used": percent,
         "tokens_started": tokens_started if isinstance(tokens_started, list) else [],
+        "started_by_chain": dict(started_by_chain),
     }
 
 
@@ -480,6 +642,7 @@ def social_history_summary(date, limit, max_posts, warnings):
     rows = load_jsonl(path, warnings=warnings)
     tokens = set()
     rank_counts = Counter()
+    chain_counts = Counter()
     posts_found = 0
     users_found = 0
     alerts_generated = 0
@@ -487,8 +650,12 @@ def social_history_summary(date, limit, max_posts, warnings):
 
     for row in rows:
         token = row.get("token_address")
+        chain_id = row.get("chain_id") or split_watchlist_key(row.get("watchlist_key"))[0] or "unknown"
+        chain_counts[chain_id] += 1
         if token:
-            tokens.add(str(token).lower())
+            normalized_token = normalize_address(token)
+            tokens.add(f"{chain_id}:{normalized_token}")
+            tokens.add(normalized_token)
 
         posts = row.get("posts_found") or row.get("posts_count") or row.get("result_count") or 0
         users = row.get("users_found") or row.get("users_count") or 0
@@ -531,6 +698,7 @@ def social_history_summary(date, limit, max_posts, warnings):
         "alerts_generated_total": alerts_generated,
         "tokens_expired": expired,
         "alert_rank_distribution": dict(rank_counts),
+        "chain_counts": dict(chain_counts),
         "latest_events": rows[-limit:],
         "tokens": tokens,
     }
@@ -552,12 +720,14 @@ def load_alerts(date, warnings):
 def alerts_summary(date, limit, watchlist, warnings, criticals):
     accumulated, daily, daily_path = load_alerts(date, warnings)
     rank_counts = Counter()
+    chain_counts = Counter()
     token_counts = Counter()
     signature_counts = Counter()
     max_rank_by_token = defaultdict(float)
 
     for alert in accumulated:
         token = str(alert.get("token_address", "")).lower()
+        chain_id = alert_chain_id(alert)
         rank = alert.get("alert_rank")
         signature = alert.get("alert_signature")
 
@@ -569,7 +739,11 @@ def alerts_summary(date, limit, watchlist, warnings, criticals):
                 pass
 
         if token:
-            token_counts[token] += 1
+            token_counts[f"{chain_id}:{token}"] += 1
+        chain_counts[chain_id] += 1
+
+        if not alert.get("chain_id"):
+            warnings.append(f"Alerta sem chain_id: {token}")
 
         if token and signature:
             signature_counts[(token, str(rank), signature)] += 1
@@ -579,7 +753,7 @@ def alerts_summary(date, limit, watchlist, warnings, criticals):
             warnings.append(f"Alerta repetido para mesmo token/rank/signature ({count}x): {token} rank={rank} {signature}")
 
     for token, max_rank in max_rank_by_token.items():
-        wl_token = watchlist.get(token)
+        _, wl_token = find_watchlist_entry(watchlist, token)
         if not isinstance(wl_token, dict):
             continue
 
@@ -599,6 +773,7 @@ def alerts_summary(date, limit, watchlist, warnings, criticals):
         "total_accumulated": len(accumulated),
         "total_day": len(daily),
         "rank_counts": dict(rank_counts),
+        "chain_counts": dict(chain_counts),
         "top_tokens": token_counts.most_common(limit),
         "latest_alerts": latest,
     }
@@ -619,17 +794,34 @@ def posts_summary(date, watchlist, max_posts, warnings, criticals):
         data = response.get("data", []) if isinstance(response, dict) else []
         users = get_nested(response, ["includes", "users"], [])
         meta_result_count = get_nested(response, ["meta", "result_count"])
-        token = str(payload.get("token_address") or path.stem).lower()
-        tokens_with_files.add(token)
-        wl_token = watchlist.get(token)
+        filename_chain, filename_token, legacy_name = parse_posts_filename(path)
+        token = normalize_address(payload.get("token_address") or filename_token)
+        chain_id = payload.get("chain_id") or filename_chain
+        watchlist_key = payload.get("watchlist_key")
+        wl_key, wl_token = find_watchlist_entry(watchlist, token, chain_id, watchlist_key)
+
+        if wl_token:
+            chain_id = chain_id or entry_chain_id(wl_key, wl_token)
+            watchlist_key = watchlist_key or entry_watchlist_key(wl_key, wl_token)
+
+        chain_id = chain_id or "unknown"
+        token_file_key = f"{chain_id}:{token}" if token else str(path)
+        tokens_with_files.add(token_file_key)
+        if token:
+            tokens_with_files.add(token)
         tracked_posts = social_value(wl_token or {}, "social_tracked_posts_count")
 
         data_count = len(data) if isinstance(data, list) else 0
         users_count = len(users) if isinstance(users, list) else 0
 
+        if legacy_name:
+            warnings.append(f"Possivel arquivo antigo sem prefixo chain: {relative(path)}")
+        if chain_id == "unknown":
+            warnings.append(f"Post bruto sem chain_id: {relative(path)}")
+
         if data_count > max_posts:
             warnings.append(
-                f"Bruto com {data_count} posts para {token}; API pode retornar minimo 10, "
+                f"Bruto com {data_count} posts para {token_file_key}; API pode retornar minimo 10, "
                 f"analise deve filtrar para {max_posts}."
             )
 
@@ -639,10 +831,12 @@ def posts_summary(date, watchlist, max_posts, warnings, criticals):
             tracked_num = 0
 
         if tracked_num > max_posts:
-            criticals.append(f"tracked_posts>{max_posts} na WL para {token}: {tracked_num}")
+            criticals.append(f"tracked_posts>{max_posts} na WL para {watchlist_key or token_file_key}: {tracked_num}")
 
         details.append({
             "token": token,
+            "chain_id": chain_id,
+            "watchlist_key": watchlist_key,
             "timestamp": payload.get("timestamp"),
             "path": path,
             "data_count": data_count,
@@ -656,8 +850,10 @@ def posts_summary(date, watchlist, max_posts, warnings, criticals):
         if not isinstance(wl_token, dict):
             continue
 
-        if wl_token.get("status") == "ativo" and token.lower() not in tokens_with_files:
-            warnings.append(f"Token ativo sem arquivo bruto hoje: {token}")
+        wl_key = entry_watchlist_key(token, wl_token)
+        wl_address = entry_token_address(token, wl_token)
+        if wl_token.get("status") == "ativo" and wl_key not in tokens_with_files and wl_address not in tokens_with_files:
+            warnings.append(f"Token ativo sem arquivo bruto hoje: {wl_key}")
 
     return {
         "day_dir": day_dir,
@@ -770,6 +966,13 @@ def print_config(config):
     print_key_value("cycle_interval_seconds", config.get("cycle_interval_seconds"))
     print_key_value("max_new_tokens_per_day", config.get("max_new_tokens_per_day"))
     print_key_value("followers_alert_threshold", config.get("followers_alert_threshold"))
+    print("Blacklist/excluded authors:")
+    excluded = config.get("excluded_author_usernames") or []
+    if excluded:
+        for username in excluded:
+            print(f"- {username}")
+    else:
+        print("- nenhum")
     print("Alert rules legadas:")
     for key, value in (config.get("alert_rules") or {}).items():
         print(f"- {key}: {value}")
@@ -787,6 +990,10 @@ def print_watchlist(summary, limit):
     print(f"Status: {dict(summary['status_counts'])}")
     print(f"Status reason: {dict(summary['status_reason_counts'])}")
     print(f"Chains: {dict(summary['chain_counts'])}")
+    print(f"Status por chain: {summary['status_by_chain']}")
+    print_key_value("Entries sem chain_id", summary["entries_missing_chain_id"])
+    print_key_value("Entries sem token_address", summary["entries_missing_token_address"])
+    print_key_value("Entries sem watchlist_key", summary["entries_missing_watchlist_key"])
     print_key_value("Com social_monitoring_started_at", summary["social_monitoring_started"])
     print_key_value("Com social_monitoring_expires_at", summary["social_monitoring_expires"])
     print_key_value("Com social_last_checked_at", summary["social_last_checked"])
@@ -797,7 +1004,8 @@ def print_watchlist(summary, limit):
     print("Tokens ativos:")
     for token in summary["active_tokens"][:limit]:
         print(
-            f"- {token['chain_id']} | {token['address']} | {token['symbol_name']} | "
+            f"- {token['chain_id']} | {token['watchlist_key']} | {token['address']} | {token['symbol_name']} | "
+            f"created={token['token_created_at']} ({token['token_created_at_source']}) | "
             f"first={token['first_seen_at']} | last={token['last_seen_at']} | "
             f"social={token['social_started']} -> {token['social_expires']} | "
             f"checked={token['social_last_checked']} | tracked={token['tracked_posts']} | "
@@ -812,6 +1020,8 @@ def print_scanner_latest(summary):
         "generated_at",
         "tokens_returned",
         "ethereum_found",
+        "base_found",
+        "target_chains_found",
         "new_added",
         "updated",
         "ignored_discarded",
@@ -823,6 +1033,7 @@ def print_scanner_latest(summary):
     print("Chains top:")
     for chain, count in Counter(summary.get("chains_found") or {}).most_common(10):
         print(f"- {chain}: {count}")
+    print(f"Target chains breakdown: {summary.get('target_chains_breakdown')}")
 
 
 def print_social_latest(summary):
@@ -847,9 +1058,13 @@ def print_usage(summary):
     print_key_value("new_tokens_started", summary["new_tokens_started"])
     print_key_value("max_new_tokens_per_day", summary["max_new_tokens_per_day"])
     print_key_value("percentual usado", format_percent(summary["percent_used"]))
+    print(f"Started por chain: {summary['started_by_chain']}")
     print("Tokens started recentes:")
     for token in summary["tokens_started"][-10:]:
-        print(f"- {token}")
+        if isinstance(token, dict):
+            print(f"- chain={token.get('chain_id')} | key={token.get('watchlist_key')} | token={token.get('token_address')}")
+        else:
+            print(f"- {token}")
 
 
 def print_history(summary, limit):
@@ -862,10 +1077,12 @@ def print_history(summary, limit):
     print_key_value("alert_generated total", summary["alerts_generated_total"])
     print_key_value("tokens expirados", summary["tokens_expired"])
     print(f"Distribuicao origin alert_rank: {summary['alert_rank_distribution']}")
+    print(f"Eventos por chain: {summary['chain_counts']}")
     print(f"Ultimos {limit} eventos:")
     for event in summary["latest_events"]:
+        chain_id = event.get("chain_id") or split_watchlist_key(event.get("watchlist_key"))[0] or "unknown"
         print(
-            f"- {event.get('timestamp')} | {event.get('token_address')} | "
+            f"- {event.get('timestamp')} | {chain_id} | {event.get('watchlist_key')} | {event.get('token_address')} | "
             f"posts={event.get('posts_found', event.get('posts_count'))} | "
             f"alert={event.get('alert_generated', event.get('alerts_generated'))} | "
             f"origin_rank={event.get('alert_rank')} | status_after={event.get('status_after')}"
@@ -877,15 +1094,19 @@ def print_alerts(summary, watchlist):
     print_key_value("Total acumulado", summary["total_accumulated"])
     print_key_value("Total do dia", summary["total_day"])
     print(f"Alertas por rank de origem/reputacao: {summary['rank_counts']}")
+    print(f"Alertas por chain: {summary['chain_counts']}")
     print("Top tokens por quantidade de alertas:")
     for token, count in summary["top_tokens"]:
         print(f"- {token}: {count}")
     print("Ultimos alertas:")
     for alert in summary["latest_alerts"]:
-        token = str(alert.get("token_address", "")).lower()
-        wl_token = watchlist.get(token) if isinstance(watchlist.get(token), dict) else {}
+        token = normalize_address(alert.get("token_address"))
+        chain_id = alert_chain_id(alert)
+        wl_key, wl_token = find_watchlist_entry(watchlist, token, chain_id, alert.get("watchlist_key"))
+        if not isinstance(wl_token, dict):
+            wl_token = {}
         print(
-            f"- {alert.get('timestamp')} | {token_chain(wl_token) or 'chain?'} | {token} | origin_rank={alert.get('alert_rank')} | "
+            f"- {alert.get('timestamp')} | {chain_id} | {alert.get('watchlist_key') or wl_key} | {token} | origin_rank={alert.get('alert_rank')} | "
             f"reasons={format_alert_reasons(alert.get('alert_reasons'))} | "
             f"post_metric_telemetry={alert.get('best_post_score')} | "
             f"followers={format_number(alert.get('best_author_followers'))} | "
@@ -900,7 +1121,7 @@ def print_posts(summary):
     print_key_value("Tokens com arquivo bruto", summary["tokens_with_files"])
     for item in summary["details"]:
         print(
-            f"- {item['token']} | ts={item['timestamp']} | posts={item['data_count']} | "
+            f"- {item['chain_id']} | {item['watchlist_key']} | {item['token']} | ts={item['timestamp']} | posts={item['data_count']} | "
             f"users={item['users_count']} | result_count={item['meta_result_count']} | "
             f"WL={item['exists_in_watchlist']} | tracked={item['tracked_posts']} | "
             f"file={relative(item['path'])}"
@@ -1010,6 +1231,12 @@ def build_audit(args):
 
     if watchlist_info["active_tokens"]:
         oks.append("WL tem tokens ativos.")
+    if watchlist_info["chain_counts"]:
+        oks.append("Watchlist multi-chain carregada.")
+    if watchlist_info["entries_missing_chain_id"] == 0:
+        oks.append("Todas entries da WL tem chain_id.")
+    if watchlist_info["entries_missing_watchlist_key"] == 0:
+        oks.append("Todas entries da WL tem watchlist_key.")
     if watchlist_info["social_tracked_posts_count"]:
         oks.append("WL tem tokens com posts rastreados.")
     if not errors_info["errors"]:
@@ -1026,8 +1253,12 @@ def build_audit(args):
         warnings.append(f"Social pode estar atrasado: ultimo intervalo {last_delta}s, esperado {expected}s.")
 
     for token in watchlist_info["active_tokens"]:
-        if token["address"].lower() not in history_info["tokens"] and social_info.get("tokens_checked", 0):
-            warnings.append(f"Token ativo nao apareceu no historico social do dia: {token['address']}")
+        if (
+            token["watchlist_key"] not in history_info["tokens"]
+            and token["address"] not in history_info["tokens"]
+            and social_info.get("tokens_checked", 0)
+        ):
+            warnings.append(f"Token ativo nao apareceu no historico social do dia: {token['watchlist_key']}")
 
     return {
         "date": date,

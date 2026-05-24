@@ -92,6 +92,8 @@ def unwrap_payload(payload):
             "metadata": {
                 "timestamp": payload.get("timestamp"),
                 "token_address": payload.get("token_address"),
+                "chain_id": payload.get("chain_id"),
+                "watchlist_key": payload.get("watchlist_key"),
                 "source": payload.get("source"),
             },
             "response": payload["response"],
@@ -121,6 +123,104 @@ def filter_users_by_tweets(users_by_id, tweets):
         for user_id, user in users_by_id.items()
         if user_id in author_ids
     }
+
+
+def normalize_address(value):
+    if not value:
+        return None
+
+    value = str(value).strip().lower()
+    if value.startswith("0x") and len(value) == 42:
+        return value
+
+    return value
+
+
+def split_watchlist_key(key):
+    if not key:
+        return None, None
+
+    key = str(key)
+    if ":" not in key:
+        return None, normalize_address(key)
+
+    chain_id, token_address = key.split(":", 1)
+    return chain_id or None, normalize_address(token_address)
+
+
+def entry_token_address(key, entry):
+    if isinstance(entry, dict) and entry.get("token_address"):
+        return normalize_address(entry.get("token_address"))
+
+    _, token_address = split_watchlist_key(key)
+    return token_address
+
+
+def entry_chain_id(key, entry):
+    if isinstance(entry, dict) and entry.get("chain_id"):
+        return str(entry.get("chain_id"))
+
+    chain_id, _ = split_watchlist_key(key)
+    return chain_id or "unknown"
+
+
+def entry_watchlist_key(key, entry):
+    if isinstance(entry, dict) and entry.get("watchlist_key"):
+        return str(entry.get("watchlist_key"))
+
+    token_address = entry_token_address(key, entry)
+    chain_id = entry_chain_id(key, entry)
+
+    if token_address and chain_id and chain_id != "unknown":
+        return f"{chain_id}:{token_address}"
+
+    return str(key) if key else None
+
+
+def find_watchlist_entry(watchlist, token_address, chain_id=None, watchlist_key=None):
+    token_address = normalize_address(token_address)
+    chain_id = str(chain_id) if chain_id else None
+
+    if watchlist_key:
+        entry = watchlist.get(watchlist_key)
+        if isinstance(entry, dict):
+            return watchlist_key, entry
+
+    if not token_address:
+        return None, None
+
+    if chain_id:
+        exact_key = f"{chain_id}:{token_address}"
+        entry = watchlist.get(exact_key)
+        if isinstance(entry, dict):
+            return exact_key, entry
+
+    for key, entry in watchlist.items():
+        if not isinstance(entry, dict):
+            continue
+
+        if entry_token_address(key, entry) != token_address:
+            continue
+
+        if chain_id and entry_chain_id(key, entry) != chain_id:
+            continue
+
+        return key, entry
+
+    entry = watchlist.get(token_address)
+    if isinstance(entry, dict):
+        return token_address, entry
+
+    return None, None
+
+
+def infer_from_posts_filename(input_file):
+    stem = input_file.stem
+    if "_" not in stem:
+        return None, normalize_address(stem)
+
+    chain_id, token_address = stem.split("_", 1)
+    return chain_id or None, normalize_address(token_address)
 
 
 def format_bool(value):
@@ -215,15 +315,29 @@ def format_alert_reasons(reasons):
     return ", ".join(formatted)
 
 
-def get_alert_for_token(token_address):
+def get_alert_for_token(token_address, chain_id=None, watchlist_key=None):
     if not token_address:
         return None
 
-    wanted = str(token_address).lower()
-    matches = [
-        alert for alert in load_social_alerts()
-        if str(alert.get("token_address", "")).lower() == wanted
-    ]
+    wanted = normalize_address(token_address)
+    matches = []
+
+    for alert in load_social_alerts():
+        alert_address = normalize_address(alert.get("token_address"))
+        alert_chain = alert.get("chain_id")
+        alert_key = alert.get("watchlist_key")
+
+        if watchlist_key and alert_key == watchlist_key:
+            matches.append(alert)
+            continue
+
+        if alert_address != wanted:
+            continue
+
+        if chain_id and alert_chain and alert_chain != chain_id:
+            continue
+
+        matches.append(alert)
 
     if not matches:
         return None
@@ -398,14 +512,6 @@ def print_meta(response):
         print(f"Oldest id: {oldest_id}")
 
 
-def get_watchlist_token(watchlist, token_address):
-    if not token_address:
-        return None
-
-    token_address = str(token_address).lower()
-    return watchlist.get(token_address) or watchlist.get(str(token_address))
-
-
 def get_nested(data, keys, default=None):
     current = data
 
@@ -421,14 +527,16 @@ def get_nested(data, keys, default=None):
     return current
 
 
-def get_token_chain(token_data):
+def get_token_chain(token_data, key=None):
     if not isinstance(token_data, dict):
-        return None
+        chain_id, _ = split_watchlist_key(key)
+        return chain_id
 
     return (
         token_data.get("chain_id")
         or get_nested(token_data, ["selected_pair", "chainId"])
         or get_nested(token_data, ["token_profile", "chainId"])
+        or split_watchlist_key(key)[0]
     )
 
 
@@ -444,9 +552,9 @@ def get_tracked_tweet_ids(token_data):
     return [str(tweet_id) for tweet_id in tweet_ids if tweet_id]
 
 
-def filter_tracked_tweets_from_watchlist(tweets, token_address):
+def filter_tracked_tweets_from_watchlist(tweets, token_address, chain_id=None, watchlist_key=None):
     watchlist = load_watchlist()
-    token_data = get_watchlist_token(watchlist, token_address)
+    _, token_data = find_watchlist_entry(watchlist, token_address, chain_id, watchlist_key)
     tracked_ids = set(get_tracked_tweet_ids(token_data))
 
     if not token_data:
@@ -472,19 +580,31 @@ def print_report(input_file, payload, limit, tracked_only):
     if not isinstance(tweets, list):
         tweets = []
 
+    file_chain_id, file_token_address = infer_from_posts_filename(input_file)
+    token_address = normalize_address(metadata.get("token_address") or file_token_address)
+    chain_id = metadata.get("chain_id") or file_chain_id
+    watchlist_key = metadata.get("watchlist_key")
+    watchlist = load_watchlist()
+    watch_key, watch_token = find_watchlist_entry(watchlist, token_address, chain_id, watchlist_key)
+
+    if watch_token:
+        chain_id = chain_id or get_token_chain(watch_token, watch_key)
+        watchlist_key = watchlist_key or entry_watchlist_key(watch_key, watch_token)
+
+    chain_id = chain_id or "unknown"
+
     original_tweets = tweets
     original_tweet_count = len(original_tweets)
-    alert_context = get_alert_for_token(metadata.get("token_address"))
-    watchlist = load_watchlist()
-    watch_token = get_watchlist_token(watchlist, metadata.get("token_address"))
-    chain_id = get_token_chain(watch_token)
+    alert_context = get_alert_for_token(token_address, chain_id, watchlist_key)
     tracked_filter_applied = False
     tracked_filter_warning = None
 
     if tracked_only:
         tweets, tracked_filter_applied, tracked_filter_warning = filter_tracked_tweets_from_watchlist(
             original_tweets,
-            metadata.get("token_address"),
+            token_address,
+            chain_id,
+            watchlist_key,
         )
 
     if tracked_filter_applied:
@@ -505,10 +625,11 @@ def print_report(input_file, payload, limit, tracked_only):
 
     if metadata.get("timestamp"):
         print(f"Timestamp: {metadata['timestamp']}")
-    if metadata.get("token_address"):
-        print(f"Token: {metadata['token_address']}")
-    if chain_id:
-        print(f"Chain: {chain_id}")
+    if token_address:
+        print(f"Token: {token_address}")
+    print(f"Chain: {chain_id}")
+    if watchlist_key:
+        print(f"Watchlist key: {watchlist_key}")
     if metadata.get("source"):
         print(f"Source: {metadata['source']}")
 
@@ -555,7 +676,7 @@ def parse_args():
         "input_file",
         nargs="?",
         help=(
-            "Arquivo JSON salvo em data/social_posts/YYYY-MM-DD/token.json. "
+            "Arquivo JSON salvo em data/social_posts/YYYY-MM-DD/{chain}_{token}.json ou token.json. "
             "Se omitido, usa o JSON mais recente em data/social_posts."
         ),
     )

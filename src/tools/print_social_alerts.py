@@ -117,10 +117,92 @@ def load_watchlist():
 
 
 def get_token_from_watchlist(watchlist, token_address):
-    if not token_address:
+    _, entry = find_watchlist_entry(watchlist, token_address)
+    return entry
+
+
+def normalize_address(value):
+    if not value:
         return None
 
-    return watchlist.get(token_address.lower()) or watchlist.get(token_address)
+    value = str(value).strip().lower()
+    if value.startswith("0x") and len(value) == 42:
+        return value
+
+    return value
+
+
+def split_watchlist_key(key):
+    if not key:
+        return None, None
+
+    key = str(key)
+    if ":" not in key:
+        return None, normalize_address(key)
+
+    chain_id, token_address = key.split(":", 1)
+    return chain_id or None, normalize_address(token_address)
+
+
+def entry_token_address(key, entry):
+    if isinstance(entry, dict) and entry.get("token_address"):
+        return normalize_address(entry.get("token_address"))
+
+    _, token_address = split_watchlist_key(key)
+    return token_address
+
+
+def entry_chain_id(key, entry):
+    if isinstance(entry, dict) and entry.get("chain_id"):
+        return str(entry.get("chain_id"))
+
+    chain_id, _ = split_watchlist_key(key)
+    return chain_id or "unknown"
+
+
+def entry_watchlist_key(key, entry):
+    if isinstance(entry, dict) and entry.get("watchlist_key"):
+        return str(entry.get("watchlist_key"))
+
+    token_address = entry_token_address(key, entry)
+    chain_id = entry_chain_id(key, entry)
+
+    if token_address and chain_id and chain_id != "unknown":
+        return f"{chain_id}:{token_address}"
+
+    return str(key) if key else None
+
+
+def find_watchlist_entry(watchlist, token_address, chain_id=None):
+    token_address = normalize_address(token_address)
+    chain_id = str(chain_id) if chain_id else None
+
+    if not token_address:
+        return None, None
+
+    if chain_id:
+        exact_key = f"{chain_id}:{token_address}"
+        entry = watchlist.get(exact_key)
+        if isinstance(entry, dict):
+            return exact_key, entry
+
+    for key, entry in watchlist.items():
+        if not isinstance(entry, dict):
+            continue
+
+        if entry_token_address(key, entry) != token_address:
+            continue
+
+        if chain_id and entry_chain_id(key, entry) != chain_id:
+            continue
+
+        return key, entry
+
+    entry = watchlist.get(token_address)
+    if isinstance(entry, dict):
+        return token_address, entry
+
+    return None, None
 
 
 def get_nested(data, keys, default=None):
@@ -204,11 +286,14 @@ def token_symbol(watch_token):
     return get_nested(watch_token, ["selected_pair", "baseToken", "symbol"])
 
 
-def token_chain(watch_token):
+def token_chain(watch_token, key=None):
+    chain_from_key, _ = split_watchlist_key(key)
+
     return (
         watch_token.get("chain_id")
         or get_nested(watch_token, ["selected_pair", "chainId"])
         or get_nested(watch_token, ["token_profile", "chainId"])
+        or chain_from_key
     )
 
 
@@ -237,8 +322,34 @@ def social_fields(watch_token):
     return watch_token
 
 
-def posts_file_for_alert(alert):
-    token_address = str(alert.get("token_address", "")).lower()
+def alert_chain_id(alert, watch_key=None, watch_token=None):
+    return (
+        alert.get("chain_id")
+        or (token_chain(watch_token, watch_key) if watch_token else None)
+        or split_watchlist_key(alert.get("watchlist_key"))[0]
+        or "unknown"
+    )
+
+
+def alert_watchlist_key(alert, watch_key=None, watch_token=None):
+    if alert.get("watchlist_key"):
+        return alert.get("watchlist_key")
+
+    if watch_token:
+        return entry_watchlist_key(watch_key, watch_token)
+
+    token_address = normalize_address(alert.get("token_address"))
+    chain_id = alert_chain_id(alert)
+
+    if token_address and chain_id and chain_id != "unknown":
+        return f"{chain_id}:{token_address}"
+
+    return token_address
+
+
+def posts_file_for_alert(alert, watch_key=None, watch_token=None):
+    token_address = normalize_address(alert.get("token_address")) or ""
+    chain_id = alert_chain_id(alert, watch_key, watch_token)
     timestamp = alert.get("timestamp") or alert.get("social_monitoring_started_at")
     parsed = parse_iso(timestamp)
 
@@ -247,7 +358,15 @@ def posts_file_for_alert(alert):
     else:
         date_part = "YYYY-MM-DD"
 
-    return SOCIAL_POSTS_DIR / date_part / f"{token_address}.json"
+    day_dir = SOCIAL_POSTS_DIR / date_part
+    if chain_id and chain_id != "unknown":
+        prefixed = day_dir / f"{chain_id}_{token_address}.json"
+        if prefixed.exists():
+            return prefixed
+        legacy = day_dir / f"{token_address}.json"
+        return prefixed if not legacy.exists() else legacy
+
+    return day_dir / f"{token_address}.json"
 
 
 def source_from_args(args):
@@ -264,11 +383,24 @@ def apply_filters(alerts, args, watchlist):
     filtered = alerts
 
     if args.token:
-        wanted = args.token.lower()
+        wanted = normalize_address(args.token)
         filtered = [
             alert for alert in filtered
-            if str(alert.get("token_address", "")).lower() == wanted
+            if normalize_address(alert.get("token_address")) == wanted
         ]
+
+    if args.chain:
+        wanted_chain = args.chain
+        chain_filtered = []
+        for alert in filtered:
+            _, watch_token = find_watchlist_entry(
+                watchlist,
+                alert.get("token_address"),
+                alert.get("chain_id") or wanted_chain,
+            )
+            if alert_chain_id(alert, None, watch_token) == wanted_chain:
+                chain_filtered.append(alert)
+        filtered = chain_filtered
 
     if args.min_rank is not None:
         rank_filtered = []
@@ -285,13 +417,16 @@ def apply_filters(alerts, args, watchlist):
         filtered = rank_filtered
 
     if args.active_only:
-        filtered = [
-            alert for alert in filtered
-            if (
-                get_token_from_watchlist(watchlist, str(alert.get("token_address", "")).lower())
-                or {}
-            ).get("status") == "ativo"
-        ]
+        active_filtered = []
+        for alert in filtered:
+            _, entry = find_watchlist_entry(
+                watchlist,
+                alert.get("token_address"),
+                alert.get("chain_id"),
+            )
+            if (entry or {}).get("status") == "ativo":
+                active_filtered.append(alert)
+        filtered = active_filtered
 
     filtered = sorted(filtered, key=sort_key)
 
@@ -330,13 +465,16 @@ def print_reasons(reasons):
 def print_watchlist_details(alert, watch_token):
     metrics = scanner_metrics(watch_token)
     social = social_fields(watch_token)
-    posts_file = posts_file_for_alert(alert)
+    posts_file = posts_file_for_alert(alert, None, watch_token)
 
     print()
     print("Watchlist:")
     print(f"Status atual: {watch_token.get('status', 'indisponivel')}")
     print(f"Status reason: {watch_token.get('status_reason', 'indisponivel')}")
-    print(f"Chain: {token_chain(watch_token) or 'indisponivel'}")
+    print(f"Chain: {token_chain(watch_token) or 'unknown'}")
+    print(f"Watchlist key: {entry_watchlist_key(None, watch_token) or 'indisponivel'}")
+    print(f"Token created at: {watch_token.get('token_created_at', 'indisponivel')}")
+    print(f"Source: {watch_token.get('token_created_at_source', 'indisponivel')}")
     print(f"Token: {token_name(watch_token) or 'indisponivel'} / {token_symbol(watch_token) or 'indisponivel'}")
     print(f"Liquidity: {format_money(metrics.get('liquidity_usd'))}")
     print(f"Volume h1: {format_money(metrics.get('volume_h1'))}")
@@ -352,10 +490,20 @@ def print_watchlist_details(alert, watch_token):
 
 def print_alert(index, alert, watch_token, show_watchlist):
     reasons = alert.get("alert_reasons") or []
+    watch_key = None
+    if watch_token:
+        watch_key = alert.get("watchlist_key") or entry_watchlist_key(None, watch_token)
+    chain_id = alert_chain_id(alert, watch_key, watch_token)
+    wl_key = alert_watchlist_key(alert, watch_key, watch_token)
 
     print("-" * 80)
     print(f"[{index}] {alert.get('timestamp', 'indisponivel')}")
+    print(f"Chain: {chain_id}")
+    print(f"Watchlist key: {wl_key or 'indisponivel'}")
     print(f"Token: {alert.get('token_address', 'indisponivel')}")
+    if watch_token:
+        print(f"Token created at: {watch_token.get('token_created_at', 'indisponivel')}")
+        print(f"Source: {watch_token.get('token_created_at_source', 'indisponivel')}")
     print(f"Status: {alert.get('status_before', 'indisponivel')} -> {alert.get('status_after', 'indisponivel')}")
     print(f"Rank origem/reputacao: {alert.get('alert_rank', 'indisponivel')}")
     print_reasons(reasons)
@@ -386,7 +534,7 @@ def print_alert(index, alert, watch_token, show_watchlist):
 
 def print_compact_alert(alert, watch_token):
     symbol = token_symbol(watch_token) if watch_token else None
-    chain = token_chain(watch_token) if watch_token else None
+    chain = alert_chain_id(alert, None, watch_token)
     status = watch_token.get("status") if watch_token else alert.get("status_after")
     reasons = format_list([format_alert_reason(reason) for reason in (alert.get("alert_reasons") or [])])
     timestamp = alert.get("timestamp", "indisponivel")
@@ -421,6 +569,7 @@ def parse_args():
     parser.add_argument("--latest", action="store_true", help="Mostra apenas o alerta mais recente.")
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Mostra os ultimos N alertas.")
     parser.add_argument("--token", help="Filtra por token address.")
+    parser.add_argument("--chain", help="Filtra por chain, como ethereum ou base.")
     parser.add_argument("--min-rank", type=float, help="Filtra alertas com alert_rank >= N.")
     parser.add_argument("--active-only", action="store_true", help="Mostra apenas tokens ainda ativos na watchlist.")
     parser.add_argument("--compact", action="store_true", help="Saida curta, uma linha por alerta.")
@@ -432,7 +581,7 @@ def main():
     args = parse_args()
     source = source_from_args(args)
     alerts, warnings = load_alerts(source)
-    watchlist = load_watchlist() if args.active_only or args.show_watchlist or args.compact else {}
+    watchlist = load_watchlist() if args.active_only or args.show_watchlist or args.compact or args.chain else {}
     visible_alerts = apply_filters(alerts, args, watchlist)
 
     print_header(source, len(alerts), len(visible_alerts), warnings)
@@ -442,8 +591,8 @@ def main():
         return
 
     for index, alert in enumerate(visible_alerts, start=1):
-        token_address = str(alert.get("token_address", "")).lower()
-        watch_token = get_token_from_watchlist(watchlist, token_address)
+        token_address = normalize_address(alert.get("token_address"))
+        _, watch_token = find_watchlist_entry(watchlist, token_address, alert.get("chain_id"))
 
         if args.compact:
             print_compact_alert(alert, watch_token)

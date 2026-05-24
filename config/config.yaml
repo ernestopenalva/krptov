@@ -21,6 +21,9 @@ social_inference:
   cycle_interval_seconds: 180
   max_new_tokens_per_day: 30
 
+  excluded_author_usernames:
+    - dexsignals
+
   followers_alert_threshold: 2000
 
   badges:

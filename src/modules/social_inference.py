@@ -41,6 +41,9 @@ DEFAULT_CONFIG = {
     "cycle_interval_seconds": 180,
     "max_new_tokens_per_day": 30,
     "followers_alert_threshold": 2000,
+    "excluded_author_usernames": [
+        "dexsignals",
+    ],
     "badges": {
         "alert_on_affiliation": True,
         "alert_on_verified_business": True,
@@ -195,9 +198,9 @@ def load_watchlist(path=WATCHLIST_FILE):
         data = json.load(f)
 
     if not isinstance(data, dict):
-        raise ValueError("data/watchlist.json precisa ser um dict indexado por token_address.")
+        raise ValueError("data/watchlist.json precisa ser um dict indexado por token.")
 
-    return data
+    return migrate_watchlist_keys(data)
 
 
 def atomic_save_json(path, payload):
@@ -274,18 +277,65 @@ def normalize_ethereum_address(address):
     return address.lower()
 
 
+def make_watchlist_key(chain_id, token_address):
+    normalized_address = normalize_ethereum_address(token_address)
+    if not chain_id or not normalized_address:
+        return None
+
+    return f"{chain_id}:{normalized_address}"
+
+
+def split_watchlist_key(key):
+    if isinstance(key, str) and ":" in key:
+        chain_id, token_address = key.split(":", 1)
+        return chain_id, normalize_ethereum_address(token_address)
+
+    return None, normalize_ethereum_address(key)
+
+
+def migrate_watchlist_keys(watchlist):
+    migrated = {}
+
+    for key, entry in watchlist.items():
+        if not isinstance(entry, dict):
+            migrated[key] = entry
+            continue
+
+        token_key = key
+        if ":" not in key:
+            token_key = make_watchlist_key(entry.get("chain_id"), entry.get("token_address") or key) or key
+
+        migrated[token_key] = entry
+
+    return migrated
+
+
 def load_bearer_token():
     load_dotenv(PROJECT_ROOT / ".env")
     return os.getenv("X_BEARER_TOKEN")
 
 
-def search_token_mentions(token_address, bearer_token, max_results):
+def build_x_query(token_address, config):
+    excluded_usernames = [
+        normalize_username(username)
+        for username in config.get("excluded_author_usernames", [])
+    ]
+    excluded_usernames = [username for username in excluded_usernames if username]
+    exclusions = " ".join(f"-from:{username}" for username in excluded_usernames)
+
+    if not exclusions:
+        return f'"{token_address}"'
+
+    return f'"{token_address}" {exclusions}'
+
+
+def search_token_mentions(token_address, bearer_token, max_results, config):
     api_max_results = max(10, int(max_results))
     headers = {
         "Authorization": f"Bearer {bearer_token}",
     }
     params = {
-        "query": f'"{token_address}"',
+        "query": build_x_query(token_address, config),
         "max_results": api_max_results,
         "tweet.fields": "author_id,created_at,public_metrics,text",
         "expansions": "author_id",
@@ -318,7 +368,7 @@ def fetch_user_by_username(username, bearer_token):
     return response.json().get("data")
 
 
-def save_x_error(response, token_address, current_time):
+def save_x_error(response, token_address, current_time, chain_id=None):
     error_file = DATA_DIR / f"social_inference_error_{current_time.strftime('%Y-%m-%d')}.json"
 
     try:
@@ -337,6 +387,7 @@ def save_x_error(response, token_address, current_time):
         {
             "timestamp": to_iso(current_time),
             "token_address": token_address,
+            "chain_id": chain_id,
             "status_code": response.status_code,
             "payload": error_payload,
         }
@@ -344,14 +395,16 @@ def save_x_error(response, token_address, current_time):
     atomic_save_json(error_file, existing)
 
 
-def save_raw_posts(token_address, response_payload, current_time):
+def save_raw_posts(token_address, response_payload, current_time, chain_id=None):
     date_stamp = current_time.strftime("%Y-%m-%d")
-    output_file = POSTS_DIR / date_stamp / f"{token_address}.json"
+    file_stem = f"{chain_id}_{token_address}" if chain_id else token_address
+    output_file = POSTS_DIR / date_stamp / f"{file_stem}.json"
     atomic_save_json(
         output_file,
         {
             "timestamp": to_iso(current_time),
             "token_address": token_address,
+            "chain_id": chain_id,
             "source": X_SEARCH_RECENT_URL,
             "response": response_payload,
         },
@@ -729,12 +782,14 @@ def expire_social_monitoring(entry, current_time):
     entry["social_monitoring_completed_at"] = to_iso(current_time)
 
 
-def build_alert(token_address, entry, analysis, current_time, status_before):
+def build_alert(token_address, entry, analysis, current_time, status_before, watchlist_key=None):
     origin = analysis["origin_summary"]
 
     return {
         "timestamp": to_iso(current_time),
         "token_address": token_address,
+        "chain_id": entry.get("chain_id"),
+        "watchlist_key": watchlist_key or entry.get("watchlist_key"),
         "status_before": status_before,
         "status_after": entry.get("status"),
         "alert_rank": analysis["alert_rank"],
@@ -817,11 +872,13 @@ def can_start_new_social_token(config, usage):
     return int(usage.get("new_tokens_started") or 0) < max_new_tokens
 
 
-def register_new_social_token_started(token_address, current_time, usage):
+def register_new_social_token_started(token_address, current_time, usage, chain_id=None, watchlist_key=None):
     usage["new_tokens_started"] = int(usage.get("new_tokens_started") or 0) + 1
     usage.setdefault("tokens_started", []).append(
         {
             "token_address": token_address,
+            "chain_id": chain_id,
+            "watchlist_key": watchlist_key,
             "started_at": to_iso(current_time),
         }
     )
@@ -846,12 +903,14 @@ def apply_alert(entry, analysis, current_time):
     entry["last_alert_signature"] = analysis["alert_signature"]
 
 
-def build_history_record(token_address, status_before, entry, analysis, alert_generated, current_time):
+def build_history_record(token_address, status_before, entry, analysis, alert_generated, current_time, watchlist_key=None):
     origin = analysis["origin_summary"]
 
     return {
         "timestamp": to_iso(current_time),
         "token_address": token_address,
+        "chain_id": entry.get("chain_id"),
+        "watchlist_key": watchlist_key or entry.get("watchlist_key"),
         "status_before": status_before,
         "status_after": entry.get("status"),
         "posts_found": analysis["posts_found"],
@@ -1006,10 +1065,17 @@ def run_cycle(config_file=CONFIG_FILE):
     with watchlist_lock():
         watchlist = load_watchlist(WATCHLIST_FILE)
 
-        for token_address, entry in watchlist.items():
-            normalized_address = normalize_ethereum_address(token_address)
+        for watchlist_key, entry in watchlist.items():
+            key_chain_id, key_token_address = split_watchlist_key(watchlist_key)
+            chain_id = entry.get("chain_id") or key_chain_id
+            normalized_address = normalize_ethereum_address(entry.get("token_address")) or key_token_address
             if not normalized_address:
                 continue
+
+            if chain_id:
+                entry["chain_id"] = chain_id
+                entry["watchlist_key"] = make_watchlist_key(chain_id, normalized_address)
+            entry["token_address"] = normalized_address
 
             status_before = entry.get("status")
             if status_before not in [STATUS_NOVO, STATUS_ATIVO]:
@@ -1033,6 +1099,7 @@ def run_cycle(config_file=CONFIG_FILE):
                     analysis=empty_analysis(),
                     alert_generated=False,
                     current_time=current_time,
+                    watchlist_key=watchlist_key,
                 )
                 append_jsonl(DATA_DIR / f"social_inference_{date_stamp}.jsonl", history_record)
                 continue
@@ -1042,11 +1109,12 @@ def run_cycle(config_file=CONFIG_FILE):
                     token_address=normalized_address,
                     bearer_token=bearer_token,
                     max_results=config["max_posts_per_token"],
+                    config=config,
                 )
             except HTTPError as exc:
                 response = exc.response
                 if response is not None:
-                    save_x_error(response, normalized_address, current_time)
+                    save_x_error(response, normalized_address, current_time, chain_id=chain_id)
                     errors.append(f"{normalized_address}: HTTP {response.status_code}")
                 else:
                     errors.append(f"{normalized_address}: HTTPError sem response")
@@ -1057,11 +1125,17 @@ def run_cycle(config_file=CONFIG_FILE):
 
             if starting_new_social_token:
                 start_social_monitoring(entry, current_time, config)
-                register_new_social_token_started(normalized_address, current_time, daily_usage)
+                register_new_social_token_started(
+                    normalized_address,
+                    current_time,
+                    daily_usage,
+                    chain_id=chain_id,
+                    watchlist_key=watchlist_key,
+                )
 
             entry["social_last_checked_at"] = now_text
 
-            save_raw_posts(normalized_address, response_payload, current_time)
+            save_raw_posts(normalized_address, response_payload, current_time, chain_id=chain_id)
             tracked_tweet_ids = entry.get("social_tracked_tweet_ids") or []
             if not tracked_tweet_ids:
                 tracked_tweet_ids = get_tweet_ids(
@@ -1082,7 +1156,14 @@ def run_cycle(config_file=CONFIG_FILE):
             alert_generated = False
             if should_generate_alert(entry, analysis):
                 apply_alert(entry, analysis, current_time)
-                alert = build_alert(normalized_address, entry, analysis, current_time, status_before)
+                alert = build_alert(
+                    normalized_address,
+                    entry,
+                    analysis,
+                    current_time,
+                    status_before,
+                    watchlist_key=watchlist_key,
+                )
                 alerts.append(alert)
                 append_jsonl(DATA_DIR / f"social_alerts_{date_stamp}.jsonl", alert)
                 alerts_generated += 1
@@ -1100,6 +1181,7 @@ def run_cycle(config_file=CONFIG_FILE):
                 analysis=analysis,
                 alert_generated=alert_generated,
                 current_time=current_time,
+                watchlist_key=watchlist_key,
             )
             append_jsonl(DATA_DIR / f"social_inference_{date_stamp}.jsonl", history_record)
 

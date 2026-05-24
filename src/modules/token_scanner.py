@@ -144,9 +144,9 @@ def load_watchlist(path=WATCHLIST_FILE):
         data = json.load(f)
 
     if not isinstance(data, dict):
-        raise ValueError("data/watchlist.json precisa ser um dict indexado por token_address.")
+        raise ValueError("data/watchlist.json precisa ser um dict indexado por token.")
 
-    return data
+    return migrate_watchlist_keys(data)
 
 
 def save_json(path, payload):
@@ -179,6 +179,53 @@ def normalize_ethereum_address(address):
         return None
 
     return address.lower()
+
+
+def make_watchlist_key(chain_id, token_address):
+    normalized_address = normalize_ethereum_address(token_address)
+    if not chain_id or not normalized_address:
+        return None
+
+    return f"{chain_id}:{normalized_address}"
+
+
+def migrate_watchlist_keys(watchlist):
+    migrated = {}
+
+    for key, entry in watchlist.items():
+        if not isinstance(entry, dict):
+            migrated[key] = entry
+            continue
+
+        token_key = key
+        if ":" not in key:
+            token_key = make_watchlist_key(entry.get("chain_id"), entry.get("token_address") or key) or key
+
+        migrated[token_key] = entry
+
+    return migrated
+
+
+def timestamp_ms_to_iso(value):
+    if value in [None, ""]:
+        return None
+
+    try:
+        return datetime.fromtimestamp(int(value) / 1000).replace(microsecond=0).isoformat()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def get_token_created_at(selected_pair):
+    if not isinstance(selected_pair, dict):
+        return None, None
+
+    pair_created_at_ms = selected_pair.get("pairCreatedAt")
+    created_at = timestamp_ms_to_iso(pair_created_at_ms)
+    if not created_at:
+        return None, None
+
+    return created_at, pair_created_at_ms
 
 
 # ============================================================
@@ -298,12 +345,18 @@ def build_scanner_metrics(selected_pair):
 
 def build_new_watchlist_entry(token_profile, selected_pair, now_text):
     token_address = token_profile.get("tokenAddress")
+    chain_id = token_profile.get("chainId")
+    token_created_at, pair_created_at_ms = get_token_created_at(selected_pair)
 
     return {
         "token_address": normalize_ethereum_address(token_address),
-        "chain_id": token_profile.get("chainId"),
+        "chain_id": chain_id,
+        "watchlist_key": make_watchlist_key(chain_id, token_address),
         "status": STATUS_NOVO,
         "status_reason": None,
+        "token_created_at": token_created_at,
+        "token_created_at_source": "dexscreener_pairCreatedAt" if token_created_at else None,
+        "pair_created_at_ms": pair_created_at_ms,
         "first_seen_at": now_text,
         "last_seen_at": now_text,
         "last_seen_on_dexscreener_at": now_text,
@@ -320,6 +373,17 @@ def build_new_watchlist_entry(token_profile, selected_pair, now_text):
 
 
 def update_watchlist_entry(entry, token_profile, selected_pair, now_text):
+    token_address = token_profile.get("tokenAddress")
+    chain_id = token_profile.get("chainId")
+    token_created_at, pair_created_at_ms = get_token_created_at(selected_pair)
+
+    entry["token_address"] = normalize_ethereum_address(token_address)
+    entry["chain_id"] = chain_id
+    entry["watchlist_key"] = make_watchlist_key(chain_id, token_address)
+    if token_created_at:
+        entry["token_created_at"] = token_created_at
+        entry["token_created_at_source"] = "dexscreener_pairCreatedAt"
+        entry["pair_created_at_ms"] = pair_created_at_ms
     entry["last_seen_at"] = now_text
     entry["last_seen_on_dexscreener_at"] = now_text
     entry["times_seen"] = int(entry.get("times_seen", 0)) + 1
@@ -520,7 +584,7 @@ def run_cycle(config_file=CONFIG_FILE):
         "enrichment_errors": 0,
         "trimmed_by_size": 0,
     }
-    seen_addresses = set()
+    seen_keys = set()
 
     for token in target_tokens:
         chain_id = token.get("chainId")
@@ -528,8 +592,12 @@ def run_cycle(config_file=CONFIG_FILE):
         if not token_address:
             continue
 
-        seen_addresses.add(token_address)
-        existing = watchlist.get(token_address)
+        token_key = make_watchlist_key(chain_id, token_address)
+        if not token_key:
+            continue
+
+        seen_keys.add(token_key)
+        existing = watchlist.get(token_key)
 
         if existing and existing.get("status") == STATUS_DESCARTE:
             counters["ignored_discarded"] += 1
@@ -548,7 +616,7 @@ def run_cycle(config_file=CONFIG_FILE):
             token["scanner_error"] = str(exc)
 
         if not existing:
-            watchlist[token_address] = build_new_watchlist_entry(
+            watchlist[token_key] = build_new_watchlist_entry(
                 token_profile=token,
                 selected_pair=selected_pair,
                 now_text=now_text,
@@ -566,7 +634,7 @@ def run_cycle(config_file=CONFIG_FILE):
 
     discarded = discard_stale_new_tokens(
         watchlist=watchlist,
-        seen_addresses=seen_addresses,
+        seen_addresses=seen_keys,
         now=current_time,
         feed_disappearance_minutes=int(config["feed_disappearance_minutes"]),
     )
@@ -584,7 +652,7 @@ def run_cycle(config_file=CONFIG_FILE):
         config=config,
         counters=counters,
         watchlist=watchlist,
-        seen_addresses=seen_addresses,
+        seen_addresses=seen_keys,
         discarded=discarded,
         removed=removed,
     )
