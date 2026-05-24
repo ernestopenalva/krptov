@@ -280,6 +280,17 @@ def symbol_name(token):
     return get_nested(token, ["token_profile", "description"], "indisponivel")
 
 
+def token_chain(token):
+    if not isinstance(token, dict):
+        return None
+
+    return (
+        token.get("chain_id")
+        or get_nested(token, ["selected_pair", "chainId"])
+        or get_nested(token, ["token_profile", "chainId"])
+    )
+
+
 def social_value(token, key, default=None):
     social = token.get("social")
 
@@ -308,6 +319,7 @@ def audit_watchlist(watchlist, config, warnings, criticals):
         "total": len(watchlist),
         "status_counts": status_counts,
         "status_reason_counts": reason_counts,
+        "chain_counts": Counter(),
         "social_monitoring_started": 0,
         "social_monitoring_expires": 0,
         "social_last_checked": 0,
@@ -325,8 +337,10 @@ def audit_watchlist(watchlist, config, warnings, criticals):
 
         status = token.get("status", "outros") or "outros"
         reason = token.get("status_reason")
+        chain_id = token_chain(token) or "indisponivel"
         status_counts[status] += 1
         reason_counts[str(reason)] += 1
+        summary["chain_counts"][chain_id] += 1
 
         started = social_value(token, "social_monitoring_started_at")
         expires = social_value(token, "social_monitoring_expires_at")
@@ -359,6 +373,7 @@ def audit_watchlist(watchlist, config, warnings, criticals):
         if status == "ativo":
             active_tokens.append({
                 "address": address,
+                "chain_id": chain_id,
                 "symbol_name": symbol_name(token),
                 "first_seen_at": token.get("first_seen_at"),
                 "last_seen_at": token.get("last_seen_at"),
@@ -771,6 +786,7 @@ def print_watchlist(summary, limit):
     print_key_value("Total de tokens", summary["total"])
     print(f"Status: {dict(summary['status_counts'])}")
     print(f"Status reason: {dict(summary['status_reason_counts'])}")
+    print(f"Chains: {dict(summary['chain_counts'])}")
     print_key_value("Com social_monitoring_started_at", summary["social_monitoring_started"])
     print_key_value("Com social_monitoring_expires_at", summary["social_monitoring_expires"])
     print_key_value("Com social_last_checked_at", summary["social_last_checked"])
@@ -781,7 +797,7 @@ def print_watchlist(summary, limit):
     print("Tokens ativos:")
     for token in summary["active_tokens"][:limit]:
         print(
-            f"- {token['address']} | {token['symbol_name']} | "
+            f"- {token['chain_id']} | {token['address']} | {token['symbol_name']} | "
             f"first={token['first_seen_at']} | last={token['last_seen_at']} | "
             f"social={token['social_started']} -> {token['social_expires']} | "
             f"checked={token['social_last_checked']} | tracked={token['tracked_posts']} | "
@@ -869,7 +885,7 @@ def print_alerts(summary, watchlist):
         token = str(alert.get("token_address", "")).lower()
         wl_token = watchlist.get(token) if isinstance(watchlist.get(token), dict) else {}
         print(
-            f"- {alert.get('timestamp')} | {token} | origin_rank={alert.get('alert_rank')} | "
+            f"- {alert.get('timestamp')} | {token_chain(wl_token) or 'chain?'} | {token} | origin_rank={alert.get('alert_rank')} | "
             f"reasons={format_alert_reasons(alert.get('alert_reasons'))} | "
             f"post_metric_telemetry={alert.get('best_post_score')} | "
             f"followers={format_number(alert.get('best_author_followers'))} | "

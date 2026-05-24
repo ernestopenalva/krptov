@@ -204,6 +204,14 @@ def token_symbol(watch_token):
     return get_nested(watch_token, ["selected_pair", "baseToken", "symbol"])
 
 
+def token_chain(watch_token):
+    return (
+        watch_token.get("chain_id")
+        or get_nested(watch_token, ["selected_pair", "chainId"])
+        or get_nested(watch_token, ["token_profile", "chainId"])
+    )
+
+
 def token_name(watch_token):
     return (
         get_nested(watch_token, ["selected_pair", "baseToken", "name"])
@@ -328,6 +336,7 @@ def print_watchlist_details(alert, watch_token):
     print("Watchlist:")
     print(f"Status atual: {watch_token.get('status', 'indisponivel')}")
     print(f"Status reason: {watch_token.get('status_reason', 'indisponivel')}")
+    print(f"Chain: {token_chain(watch_token) or 'indisponivel'}")
     print(f"Token: {token_name(watch_token) or 'indisponivel'} / {token_symbol(watch_token) or 'indisponivel'}")
     print(f"Liquidity: {format_money(metrics.get('liquidity_usd'))}")
     print(f"Volume h1: {format_money(metrics.get('volume_h1'))}")
@@ -377,6 +386,7 @@ def print_alert(index, alert, watch_token, show_watchlist):
 
 def print_compact_alert(alert, watch_token):
     symbol = token_symbol(watch_token) if watch_token else None
+    chain = token_chain(watch_token) if watch_token else None
     status = watch_token.get("status") if watch_token else alert.get("status_after")
     reasons = format_list([format_alert_reason(reason) for reason in (alert.get("alert_reasons") or [])])
     timestamp = alert.get("timestamp", "indisponivel")
@@ -385,7 +395,7 @@ def print_compact_alert(alert, watch_token):
     origin = alert.get("origin_type", "indisponivel")
 
     print(
-        f"{timestamp} | rank={rank} | {symbol or 'indisponivel'} | "
+        f"{timestamp} | rank={rank} | {chain or 'chain?'} | {symbol or 'indisponivel'} | "
         f"{token_address} | {origin} | {reasons} | status={status or 'indisponivel'}"
     )
 

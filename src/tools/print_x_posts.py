@@ -406,6 +406,32 @@ def get_watchlist_token(watchlist, token_address):
     return watchlist.get(token_address) or watchlist.get(str(token_address))
 
 
+def get_nested(data, keys, default=None):
+    current = data
+
+    for key in keys:
+        if not isinstance(current, dict):
+            return default
+
+        current = current.get(key)
+
+        if current is None:
+            return default
+
+    return current
+
+
+def get_token_chain(token_data):
+    if not isinstance(token_data, dict):
+        return None
+
+    return (
+        token_data.get("chain_id")
+        or get_nested(token_data, ["selected_pair", "chainId"])
+        or get_nested(token_data, ["token_profile", "chainId"])
+    )
+
+
 def get_tracked_tweet_ids(token_data):
     if not isinstance(token_data, dict):
         return []
@@ -449,6 +475,9 @@ def print_report(input_file, payload, limit, tracked_only):
     original_tweets = tweets
     original_tweet_count = len(original_tweets)
     alert_context = get_alert_for_token(metadata.get("token_address"))
+    watchlist = load_watchlist()
+    watch_token = get_watchlist_token(watchlist, metadata.get("token_address"))
+    chain_id = get_token_chain(watch_token)
     tracked_filter_applied = False
     tracked_filter_warning = None
 
@@ -478,6 +507,8 @@ def print_report(input_file, payload, limit, tracked_only):
         print(f"Timestamp: {metadata['timestamp']}")
     if metadata.get("token_address"):
         print(f"Token: {metadata['token_address']}")
+    if chain_id:
+        print(f"Chain: {chain_id}")
     if metadata.get("source"):
         print(f"Source: {metadata['source']}")
 
