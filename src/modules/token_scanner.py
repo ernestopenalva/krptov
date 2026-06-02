@@ -1,14 +1,16 @@
 import argparse
 import json
 import os
+import time
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
 
 DEXSCREENER_LATEST_PROFILES_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEXSCREENER_TOKEN_PAIRS_URL = "https://api.dexscreener.com/token-pairs/v1/{chain_id}/{token_address}"
-TOKEN_SCANNER_VERSION = "krptov-token-scanner-v1-ethereum-watchlist-2026-05-21"
+TOKEN_SCANNER_VERSION = "krptov-token-scanner-v2-compact-watchlist-2026-06-01"
 
 STATUS_NOVO = "novo"
 STATUS_ATIVO = "ativo"
@@ -22,6 +24,7 @@ CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
 DATA_DIR = PROJECT_ROOT / "data"
 LOGS_DIR = PROJECT_ROOT / "logs"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
+WATCHLIST_LOCK_FILE = DATA_DIR / "watchlist.lock"
 LATEST_SNAPSHOT_FILE = DATA_DIR / "token_scanner_latest.json"
 LATEST_RAW_PROFILES_FILE = DATA_DIR / "token_scanner_latest_profiles_raw.json"
 
@@ -34,13 +37,40 @@ DEFAULT_CONFIG = {
     "cycle_interval_seconds": 60,
 }
 
+SCANNER_OWNED_FIELDS = {
+    "watchlist_key",
+    "chain",
+    "chain_id",
+    "token_address",
+    "token_symbol",
+    "token_name",
+    "pool_address",
+    "quote_token",
+    "quote_token_address",
+    "source",
+    "source_type",
+    "dex_id",
+    "discovered_at_utc",
+    "created_at_utc",
+    "created_block",
+    "created_tx",
+    "last_seen_at_utc",
+    "times_seen",
+    "status",
+    "status_reason",
+    "discarded_reason",
+    "discarded_at",
+    "scanner_validation_status",
+    "scanner_validation_reason",
+}
+
 
 def now():
-    return datetime.now().replace(microsecond=0)
+    return datetime.utcnow().replace(microsecond=0)
 
 
 def to_iso(value):
-    return value.isoformat()
+    return value.isoformat() + "Z"
 
 
 def parse_iso(value):
@@ -136,7 +166,9 @@ def ensure_directories():
     LOGS_DIR.mkdir(exist_ok=True)
 
 
-def load_watchlist(path=WATCHLIST_FILE):
+def load_watchlist(path=None):
+    path = path or WATCHLIST_FILE
+
     if not path.exists():
         return {}
 
@@ -150,17 +182,58 @@ def load_watchlist(path=WATCHLIST_FILE):
 
 
 def save_json(path, payload):
-    temp_path = path.with_name(f".{path.name}.tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
 
-    with temp_path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    try:
+        with temp_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
 
-    os.replace(temp_path, path)
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def append_jsonl(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+@contextmanager
+def watchlist_lock(timeout_seconds=120, poll_seconds=0.2):
+    DATA_DIR.mkdir(exist_ok=True)
+    started_at = time.time()
+    lock_handle = None
+
+    while True:
+        try:
+            lock_handle = os.open(
+                WATCHLIST_LOCK_FILE,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+            )
+            os.write(lock_handle, str(os.getpid()).encode("utf-8"))
+            break
+        except FileExistsError:
+            if time.time() - started_at >= timeout_seconds:
+                raise TimeoutError(f"Timeout aguardando lock da watchlist: {WATCHLIST_LOCK_FILE}")
+            time.sleep(poll_seconds)
+
+    try:
+        yield
+    finally:
+        if lock_handle is not None:
+            os.close(lock_handle)
+        try:
+            WATCHLIST_LOCK_FILE.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def normalize_ethereum_address(address):
@@ -201,7 +274,7 @@ def migrate_watchlist_keys(watchlist):
         if ":" not in key:
             token_key = make_watchlist_key(entry.get("chain_id"), entry.get("token_address") or key) or key
 
-        migrated[token_key] = entry
+        migrated[token_key] = normalize_compact_watchlist_entry(entry, token_key)
 
     return migrated
 
@@ -211,7 +284,7 @@ def timestamp_ms_to_iso(value):
         return None
 
     try:
-        return datetime.fromtimestamp(int(value) / 1000).replace(microsecond=0).isoformat()
+        return datetime.utcfromtimestamp(int(value) / 1000).replace(microsecond=0).isoformat() + "Z"
     except (TypeError, ValueError, OSError):
         return None
 
@@ -226,6 +299,115 @@ def get_token_created_at(selected_pair):
         return None, None
 
     return created_at, pair_created_at_ms
+
+
+def get_pair_token_data(selected_pair, token_address):
+    if not isinstance(selected_pair, dict):
+        return {}, {}
+
+    normalized_address = normalize_ethereum_address(token_address)
+    base_token = selected_pair.get("baseToken") or {}
+    quote_token = selected_pair.get("quoteToken") or {}
+    base_address = normalize_ethereum_address(base_token.get("address"))
+    quote_address = normalize_ethereum_address(quote_token.get("address"))
+
+    if normalized_address and quote_address == normalized_address:
+        return quote_token, base_token
+
+    return base_token, quote_token
+
+
+def get_compact_pair_fields(selected_pair, token_address):
+    token_data, quote_data = get_pair_token_data(selected_pair, token_address)
+
+    return {
+        "token_symbol": token_data.get("symbol"),
+        "token_name": token_data.get("name"),
+        "pool_address": selected_pair.get("pairAddress") if isinstance(selected_pair, dict) else None,
+        "quote_token": quote_data.get("symbol"),
+        "quote_token_address": normalize_ethereum_address(quote_data.get("address")),
+        "dex_id": selected_pair.get("dexId") if isinstance(selected_pair, dict) else None,
+    }
+
+
+def legacy_created_at(entry):
+    return (
+        entry.get("created_at_utc")
+        or entry.get("token_created_at")
+        or timestamp_ms_to_iso(entry.get("pair_created_at_ms"))
+    )
+
+
+def normalize_compact_watchlist_entry(entry, watchlist_key=None):
+    if not isinstance(entry, dict):
+        return entry
+
+    chain_id = entry.get("chain_id") or entry.get("chain")
+    token_address = normalize_ethereum_address(entry.get("token_address"))
+    selected_pair = entry.get("selected_pair")
+
+    if not token_address and watchlist_key and ":" in watchlist_key:
+        _, key_address = watchlist_key.split(":", 1)
+        token_address = normalize_ethereum_address(key_address)
+
+    pair_fields = get_compact_pair_fields(selected_pair, token_address)
+    compact_key = make_watchlist_key(chain_id, token_address) or watchlist_key
+    discovered_at = entry.get("discovered_at_utc") or entry.get("first_seen_at")
+    last_seen_at = (
+        entry.get("last_seen_at_utc")
+        or entry.get("last_seen_on_dexscreener_at")
+        or entry.get("last_seen_at")
+        or discovered_at
+    )
+
+    entry["watchlist_key"] = compact_key
+    entry["chain"] = chain_id
+    entry["chain_id"] = chain_id
+    entry["token_address"] = token_address
+    entry["token_symbol"] = entry.get("token_symbol") or pair_fields["token_symbol"]
+    entry["token_name"] = entry.get("token_name") or pair_fields["token_name"]
+    entry["pool_address"] = entry.get("pool_address") or pair_fields["pool_address"]
+    entry["quote_token"] = entry.get("quote_token") or pair_fields["quote_token"]
+    entry["quote_token_address"] = entry.get("quote_token_address") or pair_fields["quote_token_address"]
+    entry["source"] = entry.get("source") or "dexscreener_profiles"
+    entry["source_type"] = entry.get("source_type") or "token_profile"
+    entry["discovered_at_utc"] = discovered_at
+    entry["created_at_utc"] = legacy_created_at(entry)
+    entry["created_block"] = entry.get("created_block")
+    entry["created_tx"] = entry.get("created_tx")
+    entry["last_seen_at_utc"] = last_seen_at
+    entry["times_seen"] = int(entry.get("times_seen", 0))
+    entry["status"] = entry.get("status") or STATUS_NOVO
+    entry["social_status"] = entry.get("social_status") or "pendente"
+    entry["monitor_status"] = entry.get("monitor_status") or "pendente"
+    entry["status_reason"] = entry.get("status_reason")
+    entry["discarded_reason"] = entry.get("discarded_reason")
+    entry["telegram_alert_sent"] = bool(entry.get("telegram_alert_sent", False))
+    entry["scanner_validation_status"] = entry.get("scanner_validation_status") or (
+        "approved" if selected_pair else "pending"
+    )
+    entry["scanner_validation_reason"] = entry.get("scanner_validation_reason") or (
+        "dexscreener_profile_with_selected_pair"
+        if selected_pair
+        else "dexscreener_profile_without_pair"
+    )
+    if pair_fields["dex_id"]:
+        entry["dex_id"] = entry.get("dex_id") or pair_fields["dex_id"]
+
+    for legacy_key in [
+        "token_profile",
+        "selected_pair",
+        "scanner_metrics",
+        "token_created_at",
+        "token_created_at_source",
+        "pair_created_at_ms",
+        "first_seen_at",
+        "last_seen_at",
+        "last_seen_on_dexscreener_at",
+    ]:
+        entry.pop(legacy_key, None)
+
+    return entry
 
 
 # ============================================================
@@ -313,58 +495,46 @@ def select_pair_with_highest_liquidity(pairs):
     )
 
 
-def build_scanner_metrics(selected_pair):
-    if not selected_pair:
-        return {
-            "liquidity_usd": 0,
-            "volume_h1": 0,
-            "buys_h1": 0,
-            "sells_h1": 0,
-            "total_txns_h1": 0,
-            "mcap": None,
-            "fdv": None,
-            "price_change_m5": 0,
-            "price_change_h1": 0,
-        }
-
-    buys_h1 = int(get_nested_number(selected_pair, ["txns", "h1", "buys"]))
-    sells_h1 = int(get_nested_number(selected_pair, ["txns", "h1", "sells"]))
-
-    return {
-        "liquidity_usd": get_nested_number(selected_pair, ["liquidity", "usd"]),
-        "volume_h1": get_nested_number(selected_pair, ["volume", "h1"]),
-        "buys_h1": buys_h1,
-        "sells_h1": sells_h1,
-        "total_txns_h1": buys_h1 + sells_h1,
-        "mcap": selected_pair.get("marketCap"),
-        "fdv": selected_pair.get("fdv"),
-        "price_change_m5": get_nested_number(selected_pair, ["priceChange", "m5"]),
-        "price_change_h1": get_nested_number(selected_pair, ["priceChange", "h1"]),
-    }
-
-
 def build_new_watchlist_entry(token_profile, selected_pair, now_text):
     token_address = token_profile.get("tokenAddress")
     chain_id = token_profile.get("chainId")
-    token_created_at, pair_created_at_ms = get_token_created_at(selected_pair)
+    token_created_at, _ = get_token_created_at(selected_pair)
+    pair_fields = get_compact_pair_fields(selected_pair, token_address)
 
-    return {
+    entry = {
         "token_address": normalize_ethereum_address(token_address),
+        "chain": chain_id,
         "chain_id": chain_id,
         "watchlist_key": make_watchlist_key(chain_id, token_address),
-        "status": STATUS_NOVO,
-        "status_reason": None,
-        "token_created_at": token_created_at,
-        "token_created_at_source": "dexscreener_pairCreatedAt" if token_created_at else None,
-        "pair_created_at_ms": pair_created_at_ms,
-        "first_seen_at": now_text,
-        "last_seen_at": now_text,
-        "last_seen_on_dexscreener_at": now_text,
+        "token_symbol": pair_fields["token_symbol"],
+        "token_name": pair_fields["token_name"],
+        "pool_address": pair_fields["pool_address"],
+        "quote_token": pair_fields["quote_token"],
+        "quote_token_address": pair_fields["quote_token_address"],
+        "source": "dexscreener_profiles",
+        "source_type": "token_profile",
+        "discovered_at_utc": now_text,
+        "created_at_utc": token_created_at,
+        "created_block": None,
+        "created_tx": None,
+        "last_seen_at_utc": now_text,
         "times_seen": 1,
-        "token_profile": token_profile,
-        "selected_pair": selected_pair,
-        "scanner_metrics": build_scanner_metrics(selected_pair),
+        "status": STATUS_NOVO,
+        "social_status": "pendente",
+        "monitor_status": "pendente",
+        "status_reason": None,
+        "discarded_reason": None,
+        "telegram_alert_sent": False,
+        "scanner_validation_status": "approved" if selected_pair else "pending",
+        "scanner_validation_reason": (
+            "dexscreener_profile_with_selected_pair"
+            if selected_pair
+            else "dexscreener_profile_without_pair"
+        ),
     }
+    if pair_fields["dex_id"]:
+        entry["dex_id"] = pair_fields["dex_id"]
+    return entry
 
 
 # ============================================================
@@ -375,21 +545,49 @@ def build_new_watchlist_entry(token_profile, selected_pair, now_text):
 def update_watchlist_entry(entry, token_profile, selected_pair, now_text):
     token_address = token_profile.get("tokenAddress")
     chain_id = token_profile.get("chainId")
-    token_created_at, pair_created_at_ms = get_token_created_at(selected_pair)
+    token_created_at, _ = get_token_created_at(selected_pair)
+    pair_fields = get_compact_pair_fields(selected_pair, token_address)
 
     entry["token_address"] = normalize_ethereum_address(token_address)
+    entry["chain"] = chain_id
     entry["chain_id"] = chain_id
     entry["watchlist_key"] = make_watchlist_key(chain_id, token_address)
+    entry["token_symbol"] = pair_fields["token_symbol"] or entry.get("token_symbol")
+    entry["token_name"] = pair_fields["token_name"] or entry.get("token_name")
+    entry["pool_address"] = entry.get("pool_address") or pair_fields["pool_address"]
+    entry["quote_token"] = entry.get("quote_token") or pair_fields["quote_token"]
+    entry["quote_token_address"] = entry.get("quote_token_address") or pair_fields["quote_token_address"]
+    entry["source"] = entry.get("source") or "dexscreener_profiles"
+    entry["source_type"] = entry.get("source_type") or "token_profile"
+    entry["discovered_at_utc"] = entry.get("discovered_at_utc") or now_text
     if token_created_at:
-        entry["token_created_at"] = token_created_at
-        entry["token_created_at_source"] = "dexscreener_pairCreatedAt"
-        entry["pair_created_at_ms"] = pair_created_at_ms
-    entry["last_seen_at"] = now_text
-    entry["last_seen_on_dexscreener_at"] = now_text
+        entry["created_at_utc"] = entry.get("created_at_utc") or token_created_at
+    entry["created_block"] = entry.get("created_block")
+    entry["created_tx"] = entry.get("created_tx")
+    entry["last_seen_at_utc"] = now_text
     entry["times_seen"] = int(entry.get("times_seen", 0)) + 1
-    entry["token_profile"] = token_profile
-    entry["selected_pair"] = selected_pair
-    entry["scanner_metrics"] = build_scanner_metrics(selected_pair)
+    entry["social_status"] = entry.get("social_status") or "pendente"
+    entry["monitor_status"] = entry.get("monitor_status") or "pendente"
+    entry["discarded_reason"] = entry.get("discarded_reason")
+    entry["telegram_alert_sent"] = bool(entry.get("telegram_alert_sent", False))
+    entry["scanner_validation_status"] = "approved" if selected_pair else "pending"
+    entry["scanner_validation_reason"] = (
+        "dexscreener_profile_with_selected_pair"
+        if selected_pair
+        else "dexscreener_profile_without_pair"
+    )
+    if pair_fields["dex_id"]:
+        entry["dex_id"] = entry.get("dex_id") or pair_fields["dex_id"]
+
+    normalize_compact_watchlist_entry(entry, entry["watchlist_key"])
+
+
+def is_token_scanner_entry(entry):
+    return (
+        isinstance(entry, dict)
+        and entry.get("source") == "dexscreener_profiles"
+        and entry.get("source_type") == "token_profile"
+    )
 
 
 def discard_stale_new_tokens(watchlist, seen_addresses, now, feed_disappearance_minutes):
@@ -397,18 +595,21 @@ def discard_stale_new_tokens(watchlist, seen_addresses, now, feed_disappearance_
     max_age = timedelta(minutes=feed_disappearance_minutes)
 
     for token_address, entry in watchlist.items():
+        if not is_token_scanner_entry(entry):
+            continue
         if entry.get("status") != STATUS_NOVO:
             continue
         if token_address in seen_addresses:
             continue
 
-        last_seen = parse_iso(entry.get("last_seen_on_dexscreener_at"))
+        last_seen = parse_iso(entry.get("last_seen_at_utc"))
         if not last_seen:
             continue
 
         if now - last_seen > max_age:
             entry["status"] = STATUS_DESCARTE
             entry["status_reason"] = STATUS_REASON_DESCARTE_FEED
+            entry["discarded_reason"] = STATUS_REASON_DESCARTE_FEED
             entry["discarded_at"] = to_iso(now)
             discarded.append(token_address)
 
@@ -420,6 +621,8 @@ def remove_expired_discards(watchlist, now, discard_retention_hours):
     retention = timedelta(hours=discard_retention_hours)
 
     for token_address, entry in list(watchlist.items()):
+        if not is_token_scanner_entry(entry):
+            continue
         if entry.get("status") != STATUS_DESCARTE:
             continue
 
@@ -443,9 +646,9 @@ def trim_watchlist_if_needed(watchlist, config):
         return []
 
     removable = [
-        (token_address, parse_iso(entry.get("last_seen_at")) or datetime.min)
+        (token_address, parse_iso(entry.get("last_seen_at_utc")) or datetime.min)
         for token_address, entry in watchlist.items()
-        if entry.get("status") == STATUS_NOVO
+        if is_token_scanner_entry(entry) and entry.get("status") == STATUS_NOVO
     ]
     removable.sort(key=lambda item: item[1])
 
@@ -458,31 +661,47 @@ def trim_watchlist_if_needed(watchlist, config):
     return removed
 
 
-def preserve_social_fields(outgoing_watchlist, current_watchlist):
-    social_keys = (
-        "social_",
-        "telegram_alert_",
-        "last_alert_",
-    )
-    exact_keys = {
-        "best_social_score",
-        "best_alert_rank",
-    }
+def merge_watchlist_for_save(current_watchlist, scanner_watchlist, removed_keys):
+    merged = current_watchlist.copy()
 
-    for token_address, outgoing_entry in outgoing_watchlist.items():
-        current_entry = current_watchlist.get(token_address)
+    for watchlist_key in removed_keys:
+        current_entry = merged.get(watchlist_key)
+        if is_token_scanner_entry(current_entry):
+            merged.pop(watchlist_key, None)
+
+    for watchlist_key, scanner_entry in scanner_watchlist.items():
+        current_entry = merged.get(watchlist_key)
+
         if not isinstance(current_entry, dict):
+            merged[watchlist_key] = scanner_entry
+            continue
+        if not is_token_scanner_entry(scanner_entry):
             continue
 
-        for key, value in current_entry.items():
-            if key.startswith(social_keys) or key in exact_keys:
-                outgoing_entry[key] = value
+        current_status = current_entry.get("status")
+        current_status_reason = current_entry.get("status_reason")
+        current_discarded_reason = current_entry.get("discarded_reason")
+        normalized_current = normalize_compact_watchlist_entry(current_entry, watchlist_key)
+        normalized_current.update(
+            {
+                key: value
+                for key, value in scanner_entry.items()
+                if key in SCANNER_OWNED_FIELDS
+            }
+        )
 
-        if current_entry.get("status_reason") == STATUS_REASON_SOCIAL_TIMEOUT:
-            outgoing_entry["status"] = STATUS_DESCARTE
-            outgoing_entry["status_reason"] = STATUS_REASON_SOCIAL_TIMEOUT
-        elif current_entry.get("status") == STATUS_ATIVO and outgoing_entry.get("status") == STATUS_NOVO:
-            outgoing_entry["status"] = STATUS_ATIVO
+        if current_status_reason == STATUS_REASON_SOCIAL_TIMEOUT:
+            normalized_current["status"] = STATUS_DESCARTE
+            normalized_current["status_reason"] = STATUS_REASON_SOCIAL_TIMEOUT
+            normalized_current["discarded_reason"] = STATUS_REASON_SOCIAL_TIMEOUT
+        elif current_status == STATUS_ATIVO:
+            normalized_current["status"] = STATUS_ATIVO
+            normalized_current["status_reason"] = current_status_reason
+            normalized_current["discarded_reason"] = current_discarded_reason
+
+        merged[watchlist_key] = normalized_current
+
+    return merged
 
 
 def write_log_lines(lines, now):
@@ -647,6 +866,15 @@ def run_cycle(config_file=CONFIG_FILE):
     counters["trimmed_by_size"] = len(trimmed)
     removed.extend(trimmed)
 
+    with watchlist_lock():
+        current_watchlist = load_watchlist()
+        watchlist = merge_watchlist_for_save(
+            current_watchlist=current_watchlist,
+            scanner_watchlist=watchlist,
+            removed_keys=removed,
+        )
+        save_json(WATCHLIST_FILE, watchlist)
+
     snapshot = build_snapshot(
         now_text=now_text,
         config=config,
@@ -657,8 +885,6 @@ def run_cycle(config_file=CONFIG_FILE):
         removed=removed,
     )
 
-    preserve_social_fields(watchlist, load_watchlist())
-    save_json(WATCHLIST_FILE, watchlist)
     save_json(LATEST_SNAPSHOT_FILE, snapshot)
     append_jsonl(DATA_DIR / f"token_scanner_{date_stamp}.jsonl", snapshot)
 
