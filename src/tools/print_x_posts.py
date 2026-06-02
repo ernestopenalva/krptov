@@ -136,6 +136,15 @@ def normalize_address(value):
     return value
 
 
+def is_evm_address(value):
+    return (
+        isinstance(value, str)
+        and value.startswith("0x")
+        and len(value) == 42
+        and all(character in "0123456789abcdef" for character in value[2:].lower())
+    )
+
+
 def split_watchlist_key(key):
     if not key:
         return None, None
@@ -159,6 +168,8 @@ def entry_token_address(key, entry):
 def entry_chain_id(key, entry):
     if isinstance(entry, dict) and entry.get("chain_id"):
         return str(entry.get("chain_id"))
+    if isinstance(entry, dict) and entry.get("chain"):
+        return str(entry.get("chain"))
 
     chain_id, _ = split_watchlist_key(key)
     return chain_id or "unknown"
@@ -217,10 +228,15 @@ def find_watchlist_entry(watchlist, token_address, chain_id=None, watchlist_key=
 def infer_from_posts_filename(input_file):
     stem = input_file.stem
     if "_" not in stem:
-        return None, normalize_address(stem)
+        token_address = normalize_address(stem)
+        return (None, token_address) if is_evm_address(token_address) else (None, None)
 
     chain_id, token_address = stem.split("_", 1)
-    return chain_id or None, normalize_address(token_address)
+    token_address = normalize_address(token_address)
+    if not is_evm_address(token_address):
+        return None, None
+
+    return chain_id or None, token_address
 
 
 def format_bool(value):
@@ -534,6 +550,7 @@ def get_token_chain(token_data, key=None):
 
     return (
         token_data.get("chain_id")
+        or token_data.get("chain")
         or get_nested(token_data, ["selected_pair", "chainId"])
         or get_nested(token_data, ["token_profile", "chainId"])
         or split_watchlist_key(key)[0]

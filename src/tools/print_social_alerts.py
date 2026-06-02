@@ -155,6 +155,8 @@ def entry_token_address(key, entry):
 def entry_chain_id(key, entry):
     if isinstance(entry, dict) and entry.get("chain_id"):
         return str(entry.get("chain_id"))
+    if isinstance(entry, dict) and entry.get("chain"):
+        return str(entry.get("chain"))
 
     chain_id, _ = split_watchlist_key(key)
     return chain_id or "unknown"
@@ -250,6 +252,84 @@ def format_bool(value):
     return "indisponivel"
 
 
+def format_affiliation(prefix, source):
+    found = source.get(f"{prefix}_affiliation_found")
+    if not found:
+        return "nao"
+
+    raw = source.get(f"{prefix}_affiliation_raw")
+    name = source.get(f"{prefix}_affiliation_name")
+    username = source.get(f"{prefix}_affiliation_username")
+    affiliation_id = source.get(f"{prefix}_affiliation_id")
+    affiliation_type = source.get(f"{prefix}_affiliation_type")
+    parts = []
+
+    if name:
+        parts.append(str(name))
+    if username:
+        parts.append(f"@{username}")
+    if affiliation_id:
+        parts.append(f"id={affiliation_id}")
+    if affiliation_type:
+        parts.append(f"type={affiliation_type}")
+    if raw and not parts:
+        parts.append("raw=" + json.dumps(raw, ensure_ascii=False))
+
+    if not parts:
+        return "sim"
+
+    return "sim (" + ", ".join(parts) + ")"
+
+
+def print_author_summary(title, summary):
+    print(f"{title}:")
+    if not isinstance(summary, dict):
+        print("- indisponivel")
+        return
+
+    username = summary.get("username") or "indisponivel"
+    print(f"- Author: @{username}")
+    print(f"- Followers: {format_number(summary.get('followers'))}")
+    print(f"- Verified: {format_bool(summary.get('verified'))}")
+    print(f"- Verified type: {summary.get('verified_type', 'indisponivel')}")
+    print(
+        "- Affiliation: "
+        + format_affiliation("", {
+            "_affiliation_found": summary.get("affiliation_found"),
+            "_affiliation_name": summary.get("affiliation_name"),
+            "_affiliation_username": summary.get("affiliation_username"),
+            "_affiliation_id": summary.get("affiliation_id"),
+            "_affiliation_type": summary.get("affiliation_type"),
+        })
+    )
+
+
+def print_trigger_posts(posts):
+    print("Trigger posts:")
+    if not posts:
+        print("- indisponivel")
+        return
+
+    for post in posts[:3]:
+        print(f"- URL: {post.get('url') or 'indisponivel'}")
+        print(f"  Author: @{post.get('author_username', 'indisponivel')}")
+        print(f"  Created: {post.get('created_at', 'indisponivel')}")
+        metrics = post.get("public_metrics") or {}
+        print(
+            "  Metrics: "
+            f"likes={metrics.get('like_count', 0)} "
+            f"replies={metrics.get('reply_count', 0)} "
+            f"retweets={metrics.get('retweet_count', 0)} "
+            f"quotes={metrics.get('quote_count', 0)} "
+            f"impressions={metrics.get('impression_count', 0)}"
+        )
+        text = (post.get("text") or "").strip()
+        if text:
+            print("  Text:")
+            for line in text.splitlines()[:6]:
+                print(f"    {line}")
+
+
 def format_list(values):
     if not values:
         return "nenhum"
@@ -283,7 +363,10 @@ def short_address(value):
 
 
 def token_symbol(watch_token):
-    return get_nested(watch_token, ["selected_pair", "baseToken", "symbol"])
+    return (
+        watch_token.get("token_symbol")
+        or get_nested(watch_token, ["selected_pair", "baseToken", "symbol"])
+    )
 
 
 def token_chain(watch_token, key=None):
@@ -291,6 +374,7 @@ def token_chain(watch_token, key=None):
 
     return (
         watch_token.get("chain_id")
+        or watch_token.get("chain")
         or get_nested(watch_token, ["selected_pair", "chainId"])
         or get_nested(watch_token, ["token_profile", "chainId"])
         or chain_from_key
@@ -299,7 +383,8 @@ def token_chain(watch_token, key=None):
 
 def token_name(watch_token):
     return (
-        get_nested(watch_token, ["selected_pair", "baseToken", "name"])
+        watch_token.get("token_name")
+        or get_nested(watch_token, ["selected_pair", "baseToken", "name"])
         or get_nested(watch_token, ["token_profile", "description"])
     )
 
@@ -470,11 +555,15 @@ def print_watchlist_details(alert, watch_token):
     print()
     print("Watchlist:")
     print(f"Status atual: {watch_token.get('status', 'indisponivel')}")
+    print(f"Social status: {watch_token.get('social_status', 'indisponivel')}")
+    print(f"Monitor status: {watch_token.get('monitor_status', 'indisponivel')}")
     print(f"Status reason: {watch_token.get('status_reason', 'indisponivel')}")
     print(f"Chain: {token_chain(watch_token) or 'unknown'}")
     print(f"Watchlist key: {entry_watchlist_key(None, watch_token) or 'indisponivel'}")
-    print(f"Token created at: {watch_token.get('token_created_at', 'indisponivel')}")
-    print(f"Source: {watch_token.get('token_created_at_source', 'indisponivel')}")
+    print(f"Token created at: {watch_token.get('created_at_utc') or watch_token.get('token_created_at', 'indisponivel')}")
+    print(f"Source: {watch_token.get('source') or watch_token.get('token_created_at_source', 'indisponivel')}")
+    print(f"Pool: {watch_token.get('pool_address', 'indisponivel')}")
+    print(f"Quote token: {watch_token.get('quote_token', 'indisponivel')}")
     print(f"Token: {token_name(watch_token) or 'indisponivel'} / {token_symbol(watch_token) or 'indisponivel'}")
     print(f"Liquidity: {format_money(metrics.get('liquidity_usd'))}")
     print(f"Volume h1: {format_money(metrics.get('volume_h1'))}")
@@ -502,8 +591,8 @@ def print_alert(index, alert, watch_token, show_watchlist):
     print(f"Watchlist key: {wl_key or 'indisponivel'}")
     print(f"Token: {alert.get('token_address', 'indisponivel')}")
     if watch_token:
-        print(f"Token created at: {watch_token.get('token_created_at', 'indisponivel')}")
-        print(f"Source: {watch_token.get('token_created_at_source', 'indisponivel')}")
+        print(f"Token created at: {watch_token.get('created_at_utc') or watch_token.get('token_created_at', 'indisponivel')}")
+        print(f"Source: {watch_token.get('source') or watch_token.get('token_created_at_source', 'indisponivel')}")
     print(f"Status: {alert.get('status_before', 'indisponivel')} -> {alert.get('status_after', 'indisponivel')}")
     print(f"Rank origem/reputacao: {alert.get('alert_rank', 'indisponivel')}")
     print_reasons(reasons)
@@ -514,11 +603,18 @@ def print_alert(index, alert, watch_token, show_watchlist):
     print(f"Author followers: {format_number(alert.get('author_followers'))}")
     print(f"Author verified: {format_bool(alert.get('author_verified'))}")
     print(f"Author verified type: {alert.get('author_verified_type', 'indisponivel')}")
-    print(f"Author affiliation: {format_bool(alert.get('author_affiliation_found'))}")
+    print(f"Author affiliation: {format_affiliation('author', alert)}")
     print(f"Automated operator: {alert.get('automated_operator_username', 'nenhum')}")
     print(f"Operator followers: {format_number(alert.get('operator_followers'))}")
     print(f"Operator verified type: {alert.get('operator_verified_type', 'indisponivel')}")
-    print(f"Operator affiliation: {format_bool(alert.get('operator_affiliation_found'))}")
+    print(f"Operator affiliation: {format_affiliation('operator', alert)}")
+    print()
+    print_author_summary("Selected origin summary", alert.get("selected_origin_summary"))
+    print_author_summary("Best followers author", alert.get("best_followers_author_summary"))
+    print_author_summary("Best affiliation author", alert.get("best_affiliation_author_summary"))
+    print()
+    print_trigger_posts(alert.get("trigger_posts") or [])
+    print(f"Alert posts snapshot: {alert.get('raw_alert_posts_file', 'indisponivel')}")
     print(
         "Janela social: "
         f"{alert.get('social_monitoring_started_at', 'indisponivel')} -> "

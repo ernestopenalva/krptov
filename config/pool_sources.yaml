@@ -1,0 +1,29 @@
+chains:
+  ethereum:
+    enabled: true
+    rpc_env: ALCHEMY_ETH_WSS_URL
+    quote_tokens:
+      WETH: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+      USDC: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+      USDT: "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+    sources:
+      - name: uniswap_v2
+        enabled: true
+        type: uniswap_v2_factory
+        factory_address: "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
+        event: PairCreated
+      - name: uniswap_v3
+        enabled: true
+        type: uniswap_v3_factory
+        factory_address: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+        event: PoolCreated
+      - name: sushiswap_v2
+        enabled: true
+        type: uniswap_v2_factory
+        factory_address: "0xC0AEe478e3658e2610c5F7A4A2E1777cE9e4f2Ac"
+        event: PairCreated
+      - name: uniswap_v4
+        enabled: true
+        type: uniswap_v4_pool_manager
+        pool_manager_address: "0x000000000004444c5dc75cB358380D2e3dE08A90"
+        event: Initialize

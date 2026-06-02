@@ -12,6 +12,7 @@ LOGS_DIR = PROJECT_ROOT / "logs"
 CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 TOKEN_SCANNER_LATEST_FILE = DATA_DIR / "token_scanner_latest.json"
+POOL_SCANNER_DIR = DATA_DIR / "pool_scanner"
 SOCIAL_INFERENCE_LATEST_FILE = DATA_DIR / "social_inference_latest.json"
 SOCIAL_ALERTS_FILE = DATA_DIR / "social_alerts.json"
 SOCIAL_POSTS_DIR = DATA_DIR / "social_posts"
@@ -250,6 +251,8 @@ def entry_token_address(key, entry):
 def entry_chain_id(key, entry):
     if isinstance(entry, dict) and entry.get("chain_id"):
         return str(entry.get("chain_id"))
+    if isinstance(entry, dict) and entry.get("chain"):
+        return str(entry.get("chain"))
 
     chain_id, _ = split_watchlist_key(key)
     return chain_id or "unknown"
@@ -368,8 +371,8 @@ def format_age(timestamp):
 
 
 def symbol_name(token):
-    symbol = get_nested(token, ["selected_pair", "baseToken", "symbol"])
-    name = get_nested(token, ["selected_pair", "baseToken", "name"])
+    symbol = token.get("token_symbol") or get_nested(token, ["selected_pair", "baseToken", "symbol"])
+    name = token.get("token_name") or get_nested(token, ["selected_pair", "baseToken", "name"])
 
     if symbol and name:
         return f"{symbol} / {name}"
@@ -387,6 +390,7 @@ def token_chain(token):
 
     return (
         token.get("chain_id")
+        or token.get("chain")
         or get_nested(token, ["selected_pair", "chainId"])
         or get_nested(token, ["token_profile", "chainId"])
     )
@@ -394,9 +398,11 @@ def token_chain(token):
 
 def token_created_at(token):
     return (
-        token.get("token_created_at")
+        token.get("created_at_utc")
+        or token.get("token_created_at")
         or get_nested(token, ["selected_pair", "pairCreatedAt"])
         or token.get("first_seen_at")
+        or token.get("discovered_at_utc")
     )
 
 
@@ -468,7 +474,7 @@ def audit_watchlist(watchlist, config, warnings, criticals):
         chain_id = entry_chain_id(key, token)
         wl_key = entry_watchlist_key(key, token)
 
-        if not token.get("chain_id"):
+        if not (token.get("chain_id") or token.get("chain")):
             entries_missing_chain += 1
             warnings.append(f"Watchlist entry sem chain_id: {wl_key or key}")
         if not token.get("token_address"):
@@ -517,10 +523,10 @@ def audit_watchlist(watchlist, config, warnings, criticals):
                 "address": address,
                 "chain_id": chain_id,
                 "symbol_name": symbol_name(token),
-                "first_seen_at": token.get("first_seen_at"),
-                "last_seen_at": token.get("last_seen_at"),
-                "token_created_at": token.get("token_created_at"),
-                "token_created_at_source": token.get("token_created_at_source"),
+                "first_seen_at": token.get("first_seen_at") or token.get("discovered_at_utc"),
+                "last_seen_at": token.get("last_seen_at") or token.get("last_seen_at_utc"),
+                "token_created_at": token_created_at(token),
+                "token_created_at_source": token.get("token_created_at_source") or token.get("source"),
                 "social_started": started,
                 "social_expires": expires,
                 "social_last_checked": checked,
@@ -560,12 +566,41 @@ def audit_watchlist(watchlist, config, warnings, criticals):
     return summary
 
 
-def scanner_latest_summary(warnings):
+def scanner_latest_summary(date, warnings):
+    pool_events_file = POOL_SCANNER_DIR / f"events_{date}.jsonl"
+    if pool_events_file.exists():
+        rows = load_jsonl(pool_events_file, warnings=warnings)
+        chain_counts = Counter()
+        source_counts = Counter()
+        accepted = 0
+        ignored = 0
+
+        for row in rows:
+            chain_counts[row.get("chain") or "unknown"] += 1
+            source_counts[row.get("source") or "unknown"] += 1
+            if row.get("ignored_reason"):
+                ignored += 1
+            else:
+                accepted += 1
+
+        return {
+            "mode": "pool_scanner",
+            "path": pool_events_file,
+            "generated_at": rows[-1].get("received_at_utc") if rows else None,
+            "events_total": len(rows),
+            "events_accepted": accepted,
+            "events_ignored": ignored,
+            "chains_found": dict(chain_counts),
+            "source_counts": dict(source_counts),
+        }
+
     data = load_json(TOKEN_SCANNER_LATEST_FILE, default={}, warnings=warnings)
     counters = data.get("counters", {}) if isinstance(data, dict) else {}
     chains = data.get("chains_found") or counters.get("chains_found") or {}
 
     return {
+        "mode": "token_scanner_legacy",
+        "path": TOKEN_SCANNER_LATEST_FILE,
         "generated_at": data.get("generated_at"),
         "tokens_returned": counters.get("tokens_returned"),
         "ethereum_found": counters.get("ethereum_found"),
@@ -913,7 +948,23 @@ def extract_log_cycles(path, limit, warnings):
 
 
 def logs_summary(date, limit, config, warnings):
-    scanner = extract_log_cycles(LOGS_DIR / f"token_scanner_{date}.txt", limit, warnings)
+    pool_events_file = POOL_SCANNER_DIR / f"events_{date}.jsonl"
+    if pool_events_file.exists():
+        rows = load_jsonl(pool_events_file, warnings=warnings)
+        timestamps = [
+            row.get("received_at_utc")
+            for row in rows
+            if row.get("received_at_utc")
+        ]
+        scanner = {
+            "path": pool_events_file,
+            "count": len(rows),
+            "first": timestamps[0] if timestamps else None,
+            "last": timestamps[-1] if timestamps else None,
+            "latest": timestamps[-limit:],
+        }
+    else:
+        scanner = extract_log_cycles(LOGS_DIR / f"token_scanner_{date}.txt", limit, warnings)
     social = extract_log_cycles(LOGS_DIR / f"social_inference_{date}.txt", limit, warnings)
     expected = config.get("cycle_interval_seconds")
     last_delta = None
@@ -1016,6 +1067,21 @@ def print_watchlist(summary, limit):
 
 def print_scanner_latest(summary):
     print_section("4. Scanner latest")
+    print_key_value("mode", summary.get("mode"))
+    print_key_value("path", relative(summary["path"]) if summary.get("path") else None)
+
+    if summary.get("mode") == "pool_scanner":
+        for key in (
+            "generated_at",
+            "events_total",
+            "events_accepted",
+            "events_ignored",
+        ):
+            print_key_value(key, summary.get(key))
+        print(f"Chains: {summary.get('chains_found')}")
+        print(f"Sources: {summary.get('source_counts')}")
+        return
+
     for key in (
         "generated_at",
         "tokens_returned",
@@ -1215,7 +1281,7 @@ def build_audit(args):
         oks.append("Watchlist carregada.")
 
     watchlist_info = audit_watchlist(watchlist, config, warnings, criticals)
-    scanner_info = scanner_latest_summary(warnings)
+    scanner_info = scanner_latest_summary(date, warnings)
     social_info = social_latest_summary(warnings, criticals)
     usage_info = usage_summary(date, config, warnings)
     history_info = social_history_summary(date, args.limit, max_posts, warnings)

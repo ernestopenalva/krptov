@@ -22,6 +22,10 @@ STATUS_ATIVO = "ativo"
 STATUS_DESCARTE = "descarte"
 STATUS_REASON_SOCIAL_TIMEOUT = "social_timeout"
 
+SOCIAL_STATUS_PENDENTE = "pendente"
+SOCIAL_STATUS_ATIVO = "ativo"
+SOCIAL_STATUS_CONCLUIDO = "concluido"
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
 DATA_DIR = PROJECT_ROOT / "data"
@@ -31,6 +35,7 @@ WATCHLIST_LOCK_FILE = DATA_DIR / "watchlist.lock"
 LATEST_SNAPSHOT_FILE = DATA_DIR / "social_inference_latest.json"
 ALERTS_FILE = DATA_DIR / "social_alerts.json"
 POSTS_DIR = DATA_DIR / "social_posts"
+ALERT_POSTS_DIR = DATA_DIR / "social_alert_posts"
 
 DEFAULT_CONFIG = {
     "enabled": True,
@@ -188,6 +193,7 @@ def ensure_directories():
     DATA_DIR.mkdir(exist_ok=True)
     LOGS_DIR.mkdir(exist_ok=True)
     POSTS_DIR.mkdir(exist_ok=True)
+    ALERT_POSTS_DIR.mkdir(exist_ok=True)
 
 
 def load_watchlist(path=WATCHLIST_FILE):
@@ -303,11 +309,38 @@ def migrate_watchlist_keys(watchlist):
 
         token_key = key
         if ":" not in key:
-            token_key = make_watchlist_key(entry.get("chain_id"), entry.get("token_address") or key) or key
+            chain_id = entry.get("chain_id") or entry.get("chain")
+            token_key = make_watchlist_key(chain_id, entry.get("token_address") or key) or key
 
         migrated[token_key] = entry
 
     return migrated
+
+
+def normalize_watchlist_entry_layout(entry, watchlist_key):
+    key_chain_id, key_token_address = split_watchlist_key(watchlist_key)
+    chain_id = entry.get("chain_id") or entry.get("chain") or key_chain_id
+    token_address = normalize_ethereum_address(entry.get("token_address")) or key_token_address
+
+    if chain_id:
+        entry["chain"] = chain_id
+        entry["chain_id"] = chain_id
+    if token_address:
+        entry["token_address"] = token_address
+    if chain_id and token_address:
+        entry["watchlist_key"] = make_watchlist_key(chain_id, token_address)
+
+    if entry.get("social_status"):
+        return chain_id, token_address
+
+    if entry.get("status_reason") == STATUS_REASON_SOCIAL_TIMEOUT:
+        entry["social_status"] = SOCIAL_STATUS_CONCLUIDO
+    elif entry.get("status") == STATUS_ATIVO:
+        entry["social_status"] = SOCIAL_STATUS_ATIVO
+    else:
+        entry["social_status"] = SOCIAL_STATUS_PENDENTE
+
+    return chain_id, token_address
 
 
 def load_bearer_token():
@@ -411,6 +444,34 @@ def save_raw_posts(token_address, response_payload, current_time, chain_id=None)
     )
 
 
+def save_alert_posts_snapshot(token_address, response_payload, analysis, current_time, chain_id=None):
+    date_stamp = current_time.strftime("%Y-%m-%d")
+    time_stamp = current_time.strftime("%H%M%S")
+    file_stem = f"{chain_id}_{token_address}" if chain_id else token_address
+    output_file = ALERT_POSTS_DIR / date_stamp / f"{file_stem}_{time_stamp}.json"
+    payload = {
+        "timestamp": to_iso(current_time),
+        "token_address": token_address,
+        "chain_id": chain_id,
+        "source": X_SEARCH_RECENT_URL,
+        "response": response_payload,
+        "analysis_snapshot": {
+            "alert_rank": analysis.get("alert_rank"),
+            "alert_reasons": analysis.get("alert_reasons"),
+            "selected_origin_summary": analysis.get("selected_origin_summary"),
+            "best_followers_author_summary": analysis.get("best_followers_author_summary"),
+            "best_affiliation_author_summary": analysis.get("best_affiliation_author_summary"),
+            "trigger_posts": analysis.get("trigger_posts"),
+        },
+    }
+    atomic_save_json(output_file, payload)
+
+    try:
+        return str(output_file.relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(output_file)
+
+
 def normalize_bio(description):
     text = (description or "").lower()
     text = text.replace("\r", " ").replace("\n", " ")
@@ -460,6 +521,34 @@ def get_affiliation(user):
     if isinstance(affiliation, dict):
         return affiliation if affiliation else None
     return affiliation or None
+
+
+def parse_affiliation(user):
+    affiliation = user.get("affiliation")
+    parsed = {
+        "found": bool(affiliation),
+        "raw": affiliation or None,
+        "name": None,
+        "username": None,
+        "id": None,
+        "type": None,
+    }
+
+    if isinstance(affiliation, dict):
+        parsed["name"] = affiliation.get("name") or affiliation.get("label")
+        parsed["username"] = normalize_username(
+            affiliation.get("username") or affiliation.get("screen_name") or affiliation.get("handle")
+        )
+        parsed["id"] = affiliation.get("id") or affiliation.get("user_id")
+        parsed["type"] = affiliation.get("type") or affiliation.get("verified_type")
+        return parsed
+
+    if isinstance(affiliation, str):
+        parsed["name"] = affiliation
+        parsed["username"] = normalize_username(affiliation) if "@" in affiliation else None
+        return parsed
+
+    return parsed
 
 
 def get_author_badge(user):
@@ -600,13 +689,54 @@ def empty_origin_summary(origin_type="unknown"):
         "author_verified": False,
         "author_verified_type": None,
         "author_affiliation_found": False,
+        "author_affiliation_raw": None,
+        "author_affiliation_name": None,
+        "author_affiliation_username": None,
+        "author_affiliation_id": None,
+        "author_affiliation_type": None,
         "automated_operator_detected": False,
         "automated_operator_username": None,
         "operator_followers": None,
         "operator_verified": None,
         "operator_verified_type": None,
         "operator_affiliation_found": None,
+        "operator_affiliation_raw": None,
+        "operator_affiliation_name": None,
+        "operator_affiliation_username": None,
+        "operator_affiliation_id": None,
+        "operator_affiliation_type": None,
     }
+
+
+def build_user_summary(user):
+    if not user:
+        return None
+
+    affiliation = parse_affiliation(user)
+    return {
+        "username": user.get("username"),
+        "name": user.get("name"),
+        "id": user.get("id"),
+        "followers": get_followers_count(user),
+        "verified": bool(user.get("verified")),
+        "verified_type": user.get("verified_type"),
+        "affiliation_found": affiliation["found"],
+        "affiliation_raw": affiliation["raw"],
+        "affiliation_name": affiliation["name"],
+        "affiliation_username": affiliation["username"],
+        "affiliation_id": affiliation["id"],
+        "affiliation_type": affiliation["type"],
+    }
+
+
+def add_affiliation_fields(target, prefix, user):
+    affiliation = parse_affiliation(user)
+    target[f"{prefix}_affiliation_found"] = affiliation["found"]
+    target[f"{prefix}_affiliation_raw"] = affiliation["raw"]
+    target[f"{prefix}_affiliation_name"] = affiliation["name"]
+    target[f"{prefix}_affiliation_username"] = affiliation["username"]
+    target[f"{prefix}_affiliation_id"] = affiliation["id"]
+    target[f"{prefix}_affiliation_type"] = affiliation["type"]
 
 
 def build_origin_summary(user, operator_user=None):
@@ -616,23 +746,63 @@ def build_origin_summary(user, operator_user=None):
         "author_followers": get_followers_count(user),
         "author_verified": bool(user.get("verified")),
         "author_verified_type": user.get("verified_type"),
-        "author_affiliation_found": bool(get_affiliation(user)),
         "automated_operator_detected": operator_user is not None,
         "automated_operator_username": None,
         "operator_followers": None,
         "operator_verified": None,
         "operator_verified_type": None,
-        "operator_affiliation_found": None,
     }
+    add_affiliation_fields(summary, "author", user)
 
     if operator_user:
         summary["automated_operator_username"] = operator_user.get("username")
         summary["operator_followers"] = get_followers_count(operator_user)
         summary["operator_verified"] = bool(operator_user.get("verified"))
         summary["operator_verified_type"] = operator_user.get("verified_type")
-        summary["operator_affiliation_found"] = bool(get_affiliation(operator_user))
+        add_affiliation_fields(summary, "operator", operator_user)
+    else:
+        summary.update(
+            {
+                "operator_affiliation_found": None,
+                "operator_affiliation_raw": None,
+                "operator_affiliation_name": None,
+                "operator_affiliation_username": None,
+                "operator_affiliation_id": None,
+                "operator_affiliation_type": None,
+            }
+        )
 
     return summary
+
+
+def tweets_for_user(tweets, user):
+    return [
+        tweet
+        for tweet in tweets
+        if tweet.get("author_id") == user.get("id")
+    ]
+
+
+def build_trigger_posts(user, tweets, reasons, limit=3):
+    posts = []
+    username = user.get("username")
+
+    for tweet in tweets_for_user(tweets, user)[:limit]:
+        tweet_id = tweet.get("id")
+        posts.append(
+            {
+                "tweet_id": tweet_id,
+                "created_at": tweet.get("created_at"),
+                "text": tweet.get("text"),
+                "public_metrics": tweet.get("public_metrics") or {},
+                "author_id": tweet.get("author_id"),
+                "author_username": username,
+                "url": f"https://x.com/{username}/status/{tweet_id}" if username and tweet_id else None,
+                "reasons": reasons,
+            }
+        )
+
+    return posts
 
 
 def build_social_analysis(response_payload, config, bearer_token=None):
@@ -645,19 +815,33 @@ def build_social_analysis(response_payload, config, bearer_token=None):
     best_post_score = 0
     best_author_followers = 0
     origin_summary = empty_origin_summary()
+    best_followers_author_summary = None
+    best_affiliation_author_summary = None
+    trigger_posts = []
 
     for tweet in tweets:
         tweet["krptov_engagement_rate"] = calculate_engagement_rate(tweet)
 
     for user in users:
         followers_count = get_followers_count(user)
-        best_author_followers = max(best_author_followers, followers_count)
+        if followers_count > best_author_followers:
+            best_author_followers = followers_count
+            best_followers_author_summary = build_user_summary(user)
 
         user_rank, user_reasons = relevant_profile_signal(user, config, "author")
         if user_rank > alert_rank:
             origin_summary = build_origin_summary(user)
         alert_rank = max(alert_rank, user_rank)
         alert_reasons.extend(user_reasons)
+        if user_reasons:
+            trigger_posts.extend(build_trigger_posts(user, tweets, user_reasons))
+
+        if get_affiliation(user):
+            user_summary = build_user_summary(user)
+            if not best_affiliation_author_summary or user_rank >= int(best_affiliation_author_summary.get("rank") or 0):
+                best_affiliation_author_summary = user_summary
+                best_affiliation_author_summary["rank"] = user_rank
+                best_affiliation_author_summary["reasons"] = user_reasons
 
         operator_user = None
         operator_username = None
@@ -690,6 +874,8 @@ def build_social_analysis(response_payload, config, bearer_token=None):
 
             alert_rank = max(alert_rank, operator_rank)
             alert_reasons.extend(operator_reasons)
+            if operator_reasons:
+                trigger_posts.extend(build_trigger_posts(user, tweets, operator_reasons))
 
     alert_signature = None
     if alert_rank > 0:
@@ -707,6 +893,10 @@ def build_social_analysis(response_payload, config, bearer_token=None):
         "affiliation_found": origin_summary["author_affiliation_found"],
         "bio_patterns_found": [],
         "origin_summary": origin_summary,
+        "selected_origin_summary": origin_summary,
+        "best_followers_author_summary": best_followers_author_summary,
+        "best_affiliation_author_summary": best_affiliation_author_summary,
+        "trigger_posts": trigger_posts[:3],
         "alert_rank": alert_rank,
         "alert_reasons": sorted(set(alert_reasons)),
         "alert_signature": alert_signature,
@@ -768,6 +958,7 @@ def start_social_monitoring(entry, current_time, config):
     expires_at = started_at + timedelta(hours=int(config["monitoring_window_hours"]))
 
     entry["status"] = STATUS_ATIVO
+    entry["social_status"] = SOCIAL_STATUS_ATIVO
     entry["social_monitoring_started_at"] = to_iso(started_at)
     entry["social_monitoring_expires_at"] = to_iso(expires_at)
 
@@ -778,11 +969,21 @@ def needs_social_monitoring_start(entry):
 
 def expire_social_monitoring(entry, current_time):
     entry["status"] = STATUS_DESCARTE
+    entry["social_status"] = SOCIAL_STATUS_CONCLUIDO
     entry["status_reason"] = STATUS_REASON_SOCIAL_TIMEOUT
+    entry["discarded_reason"] = STATUS_REASON_SOCIAL_TIMEOUT
     entry["social_monitoring_completed_at"] = to_iso(current_time)
 
 
-def build_alert(token_address, entry, analysis, current_time, status_before, watchlist_key=None):
+def build_alert(
+    token_address,
+    entry,
+    analysis,
+    current_time,
+    status_before,
+    watchlist_key=None,
+    raw_alert_posts_file=None,
+):
     origin = analysis["origin_summary"]
 
     return {
@@ -813,6 +1014,21 @@ def build_alert(token_address, entry, analysis, current_time, status_before, wat
         "operator_verified": origin["operator_verified"],
         "operator_verified_type": origin["operator_verified_type"],
         "operator_affiliation_found": origin["operator_affiliation_found"],
+        "author_affiliation_raw": origin.get("author_affiliation_raw"),
+        "author_affiliation_name": origin.get("author_affiliation_name"),
+        "author_affiliation_username": origin.get("author_affiliation_username"),
+        "author_affiliation_id": origin.get("author_affiliation_id"),
+        "author_affiliation_type": origin.get("author_affiliation_type"),
+        "operator_affiliation_raw": origin.get("operator_affiliation_raw"),
+        "operator_affiliation_name": origin.get("operator_affiliation_name"),
+        "operator_affiliation_username": origin.get("operator_affiliation_username"),
+        "operator_affiliation_id": origin.get("operator_affiliation_id"),
+        "operator_affiliation_type": origin.get("operator_affiliation_type"),
+        "selected_origin_summary": analysis.get("selected_origin_summary"),
+        "best_followers_author_summary": analysis.get("best_followers_author_summary"),
+        "best_affiliation_author_summary": analysis.get("best_affiliation_author_summary"),
+        "trigger_posts": analysis.get("trigger_posts") or [],
+        "raw_alert_posts_file": raw_alert_posts_file,
         "social_monitoring_started_at": entry.get("social_monitoring_started_at"),
         "social_monitoring_expires_at": entry.get("social_monitoring_expires_at"),
         "telegram_alert_sent": True,
@@ -963,6 +1179,7 @@ def social_managed_update(entry):
     elif entry.get("status_reason") == STATUS_REASON_SOCIAL_TIMEOUT:
         update["status"] = STATUS_DESCARTE
         update["status_reason"] = STATUS_REASON_SOCIAL_TIMEOUT
+        update["discarded_reason"] = STATUS_REASON_SOCIAL_TIMEOUT
 
     return update
 
@@ -991,6 +1208,10 @@ def empty_analysis():
         "affiliation_found": False,
         "bio_patterns_found": [],
         "origin_summary": empty_origin_summary(),
+        "selected_origin_summary": empty_origin_summary(),
+        "best_followers_author_summary": None,
+        "best_affiliation_author_summary": None,
+        "trigger_posts": [],
         "alert_rank": 0,
         "alert_reasons": [],
     }
@@ -1066,16 +1287,9 @@ def run_cycle(config_file=CONFIG_FILE):
         watchlist = load_watchlist(WATCHLIST_FILE)
 
         for watchlist_key, entry in watchlist.items():
-            key_chain_id, key_token_address = split_watchlist_key(watchlist_key)
-            chain_id = entry.get("chain_id") or key_chain_id
-            normalized_address = normalize_ethereum_address(entry.get("token_address")) or key_token_address
+            chain_id, normalized_address = normalize_watchlist_entry_layout(entry, watchlist_key)
             if not normalized_address:
                 continue
-
-            if chain_id:
-                entry["chain_id"] = chain_id
-                entry["watchlist_key"] = make_watchlist_key(chain_id, normalized_address)
-            entry["token_address"] = normalized_address
 
             status_before = entry.get("status")
             if status_before not in [STATUS_NOVO, STATUS_ATIVO]:
@@ -1156,6 +1370,13 @@ def run_cycle(config_file=CONFIG_FILE):
             alert_generated = False
             if should_generate_alert(entry, analysis):
                 apply_alert(entry, analysis, current_time)
+                raw_alert_posts_file = save_alert_posts_snapshot(
+                    normalized_address,
+                    analysis_payload,
+                    analysis,
+                    current_time,
+                    chain_id=chain_id,
+                )
                 alert = build_alert(
                     normalized_address,
                     entry,
@@ -1163,6 +1384,7 @@ def run_cycle(config_file=CONFIG_FILE):
                     current_time,
                     status_before,
                     watchlist_key=watchlist_key,
+                    raw_alert_posts_file=raw_alert_posts_file,
                 )
                 alerts.append(alert)
                 append_jsonl(DATA_DIR / f"social_alerts_{date_stamp}.jsonl", alert)
