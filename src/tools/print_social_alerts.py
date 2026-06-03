@@ -252,6 +252,12 @@ def format_bool(value):
     return "indisponivel"
 
 
+def first_list_value(value):
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
 def format_affiliation(prefix, source):
     found = source.get(f"{prefix}_affiliation_found")
     if not found:
@@ -262,16 +268,31 @@ def format_affiliation(prefix, source):
     username = source.get(f"{prefix}_affiliation_username")
     affiliation_id = source.get(f"{prefix}_affiliation_id")
     affiliation_type = source.get(f"{prefix}_affiliation_type")
+    url = source.get(f"{prefix}_affiliation_url")
+    badge_url = source.get(f"{prefix}_affiliation_badge_url")
+
+    if isinstance(raw, dict):
+        name = name or raw.get("description") or raw.get("name") or raw.get("label")
+        username = username or raw.get("username") or raw.get("screen_name") or raw.get("handle")
+        affiliation_id = affiliation_id or first_list_value(raw.get("user_id")) or raw.get("id")
+        affiliation_type = affiliation_type or raw.get("type") or raw.get("verified_type")
+        url = url or raw.get("url")
+        badge_url = badge_url or raw.get("badge_url")
+
     parts = []
 
     if name:
         parts.append(str(name))
     if username:
         parts.append(f"@{username}")
+    if url:
+        parts.append(str(url))
     if affiliation_id:
         parts.append(f"id={affiliation_id}")
     if affiliation_type:
         parts.append(f"type={affiliation_type}")
+    if badge_url:
+        parts.append(f"badge={badge_url}")
     if raw and not parts:
         parts.append("raw=" + json.dumps(raw, ensure_ascii=False))
 
@@ -300,6 +321,7 @@ def print_author_summary(title, summary):
             "_affiliation_username": summary.get("affiliation_username"),
             "_affiliation_id": summary.get("affiliation_id"),
             "_affiliation_type": summary.get("affiliation_type"),
+            "_affiliation_raw": summary.get("affiliation_raw"),
         })
     )
 

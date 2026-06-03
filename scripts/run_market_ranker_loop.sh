@@ -35,7 +35,7 @@ run_cycle() {
         args+=(--dry-run)
     fi
 
-    "${PYTHON_BIN}" -m src.modules.market_ranker "${args[@]}" 2>&1 | tee -a "${SESSION_LOG}"
+    "${PYTHON_BIN}" -u -m src.modules.market_ranker "${args[@]}" 2>&1 | tee -a "${SESSION_LOG}"
     return "${PIPESTATUS[0]}"
 }
 

@@ -29,7 +29,7 @@ log() {
 }
 
 run_cycle() {
-    "${PYTHON_BIN}" -m src.modules.social_inference 2>&1 | tee -a "${SESSION_LOG}"
+    "${PYTHON_BIN}" -u -m src.modules.social_inference 2>&1 | tee -a "${SESSION_LOG}"
     return "${PIPESTATUS[0]}"
 }
 

@@ -30,4 +30,4 @@ log "=== KRPTO-V | Pool Scanner Runner ==="
 log "Dry-run: ${POOL_DRY_RUN}"
 log "Log da sessao: ${SESSION_LOG}"
 
-"${PYTHON_BIN}" -m src.modules.pool_scanner "${args[@]}" 2>&1 | tee -a "${SESSION_LOG}"
+"${PYTHON_BIN}" -u -m src.modules.pool_scanner "${args[@]}" 2>&1 | tee -a "${SESSION_LOG}"
