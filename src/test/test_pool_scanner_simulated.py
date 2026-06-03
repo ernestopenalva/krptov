@@ -28,6 +28,7 @@ spec.loader.exec_module(pool_scanner)
 
 
 WETH = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+ETH = "0x0000000000000000000000000000000000000000"
 TOKEN_A = "0x1111111111111111111111111111111111111111"
 TOKEN_B = "0x2222222222222222222222222222222222222222"
 POOL = "0x3333333333333333333333333333333333333333"
@@ -147,6 +148,46 @@ class PoolScannerSimulatedTests(unittest.TestCase):
 
         self.assertIsNone(ignored_reason)
         self.assertEqual(candidate["token_address"], TOKEN_A)
+
+    def test_v4_native_eth_currency0_identifies_currency1(self):
+        decoded = pool_scanner.decode_uniswap_v4_initialize(make_v4_log(ETH, TOKEN_A))
+        candidate, ignored_reason = pool_scanner.identify_new_token(
+            decoded,
+            {WETH: "WETH", ETH: "ETH"},
+            no_quote_reason="ignored_no_known_quote_token",
+            allow_native_eth_quote=True,
+        )
+
+        self.assertIsNone(ignored_reason)
+        self.assertEqual(candidate["token_address"], TOKEN_A)
+        self.assertEqual(candidate["quote_token"], "ETH")
+        self.assertEqual(candidate["quote_token_address"], ETH)
+
+    def test_v4_native_eth_currency1_identifies_currency0(self):
+        decoded = pool_scanner.decode_uniswap_v4_initialize(make_v4_log(TOKEN_A, ETH))
+        candidate, ignored_reason = pool_scanner.identify_new_token(
+            decoded,
+            {WETH: "WETH", ETH: "ETH"},
+            no_quote_reason="ignored_no_known_quote_token",
+            allow_native_eth_quote=True,
+        )
+
+        self.assertIsNone(ignored_reason)
+        self.assertEqual(candidate["token_address"], TOKEN_A)
+        self.assertEqual(candidate["quote_token"], "ETH")
+        self.assertEqual(candidate["quote_token_address"], ETH)
+
+    def test_v2_v3_native_eth_quote_stays_ignored(self):
+        decoded = {"token0": ETH, "token1": TOKEN_A, "pool_address": POOL, "fee": None}
+        candidate, ignored_reason = pool_scanner.identify_new_token(
+            decoded,
+            {WETH: "WETH", ETH: "ETH"},
+            no_quote_reason="pool_without_known_quote_token",
+            allow_native_eth_quote=False,
+        )
+
+        self.assertIsNone(candidate)
+        self.assertEqual(ignored_reason, "pool_without_known_quote_token")
 
     def test_v4_without_known_quote_is_ignored(self):
         decoded = pool_scanner.decode_uniswap_v4_initialize(make_v4_log(TOKEN_A, TOKEN_B))

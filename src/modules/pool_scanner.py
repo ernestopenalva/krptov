@@ -23,6 +23,7 @@ WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 WATCHLIST_LOCK_FILE = DATA_DIR / "watchlist.lock"
 
 RECONNECT_DELAY_SECONDS = 5
+NATIVE_ETH_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 PAIR_CREATED_TOPIC = "0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9"
 POOL_CREATED_TOPIC = "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"
@@ -352,11 +353,22 @@ def watchlist_lock(timeout_seconds=120, poll_seconds=0.2):
             pass
 
 
-def identify_new_token(decoded_event, quote_tokens, no_quote_reason="pool_without_known_quote_token"):
+def quote_token_for(address, quote_tokens, allow_native_eth_quote=False):
+    if address == NATIVE_ETH_ADDRESS and not allow_native_eth_quote:
+        return None
+    return quote_tokens.get(address)
+
+
+def identify_new_token(
+    decoded_event,
+    quote_tokens,
+    no_quote_reason="pool_without_known_quote_token",
+    allow_native_eth_quote=False,
+):
     token0 = decoded_event.get("token0") or decoded_event.get("currency0")
     token1 = decoded_event.get("token1") or decoded_event.get("currency1")
-    token0_quote = quote_tokens.get(token0)
-    token1_quote = quote_tokens.get(token1)
+    token0_quote = quote_token_for(token0, quote_tokens, allow_native_eth_quote)
+    token1_quote = quote_token_for(token1, quote_tokens, allow_native_eth_quote)
 
     if token0_quote and token1_quote:
         return None, "both_tokens_are_known_quotes"
@@ -517,6 +529,7 @@ def process_pool_log(chain_config, source, raw_log, dry_run):
         decoded_event,
         chain_config["quote_tokens"],
         no_quote_reason=no_quote_reason,
+        allow_native_eth_quote=source["type"] == "uniswap_v4_pool_manager",
     )
 
     raw_record = build_raw_event_record(

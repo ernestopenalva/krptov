@@ -20,6 +20,9 @@ social_inference:
   max_posts_per_token: 8
   cycle_interval_seconds: 180
   max_new_tokens_per_day: 30
+  max_tokens_per_cycle: 30
+  max_new_tokens_per_cycle: 10
+  prioritize_market_score: true
 
   excluded_author_usernames:
     - dexsignals

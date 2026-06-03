@@ -45,6 +45,9 @@ DEFAULT_CONFIG = {
     "max_posts_per_token": 8,
     "cycle_interval_seconds": 180,
     "max_new_tokens_per_day": 30,
+    "max_tokens_per_cycle": 0,
+    "max_new_tokens_per_cycle": 0,
+    "prioritize_market_score": True,
     "followers_alert_threshold": 2000,
     "excluded_author_usernames": [
         "dexsignals",
@@ -341,6 +344,92 @@ def normalize_watchlist_entry_layout(entry, watchlist_key):
         entry["social_status"] = SOCIAL_STATUS_PENDENTE
 
     return chain_id, token_address
+
+
+def numeric_value(value, default=0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def sort_timestamp(value):
+    parsed = parse_iso(value)
+    if not parsed:
+        return datetime.min
+    return parsed
+
+
+def timestamp_sort_value(value):
+    parsed = sort_timestamp(value)
+    return (
+        parsed.year,
+        parsed.month,
+        parsed.day,
+        parsed.hour,
+        parsed.minute,
+        parsed.second,
+    )
+
+
+def social_candidate_sort_key(candidate):
+    entry = candidate["entry"]
+    status = entry.get("status")
+    market_score = numeric_value(entry.get("market_score"))
+    last_checked = sort_timestamp(entry.get("social_last_checked_at"))
+    created_at = sort_timestamp(entry.get("created_at_utc") or entry.get("discovered_at_utc"))
+    created_sort = timestamp_sort_value(entry.get("created_at_utc") or entry.get("discovered_at_utc"))
+
+    if status == STATUS_ATIVO:
+        return (0, last_checked, -market_score, created_at)
+
+    return (1, -market_score, tuple(-item for item in created_sort))
+
+
+def build_social_candidates(watchlist, config):
+    candidates = []
+
+    for watchlist_key, entry in watchlist.items():
+        chain_id, normalized_address = normalize_watchlist_entry_layout(entry, watchlist_key)
+        if not normalized_address:
+            continue
+
+        status = entry.get("status")
+        if status not in [STATUS_NOVO, STATUS_ATIVO]:
+            continue
+
+        candidates.append(
+            {
+                "watchlist_key": watchlist_key,
+                "entry": entry,
+                "chain_id": chain_id,
+                "token_address": normalized_address,
+            }
+        )
+
+    if config.get("prioritize_market_score", True):
+        candidates.sort(key=social_candidate_sort_key)
+
+    max_tokens = int(config.get("max_tokens_per_cycle") or 0)
+    max_new_tokens = int(config.get("max_new_tokens_per_cycle") or 0)
+    if max_tokens <= 0 and max_new_tokens <= 0:
+        return candidates
+
+    limited = []
+    new_count = 0
+
+    for candidate in candidates:
+        if max_tokens > 0 and len(limited) >= max_tokens:
+            break
+
+        if candidate["entry"].get("status") == STATUS_NOVO:
+            if max_new_tokens > 0 and new_count >= max_new_tokens:
+                continue
+            new_count += 1
+
+        limited.append(candidate)
+
+    return limited
 
 
 def load_bearer_token():
@@ -1285,15 +1374,14 @@ def run_cycle(config_file=CONFIG_FILE):
     tokens_blocked_by_daily_limit = 0
     with watchlist_lock():
         watchlist = load_watchlist(WATCHLIST_FILE)
+        social_candidates = build_social_candidates(watchlist, config)
 
-        for watchlist_key, entry in watchlist.items():
-            chain_id, normalized_address = normalize_watchlist_entry_layout(entry, watchlist_key)
-            if not normalized_address:
-                continue
-
+        for candidate in social_candidates:
+            watchlist_key = candidate["watchlist_key"]
+            entry = candidate["entry"]
+            chain_id = candidate["chain_id"]
+            normalized_address = candidate["token_address"]
             status_before = entry.get("status")
-            if status_before not in [STATUS_NOVO, STATUS_ATIVO]:
-                continue
 
             starting_new_social_token = status_before == STATUS_NOVO or needs_social_monitoring_start(entry)
             if starting_new_social_token and not can_start_new_social_token(config, daily_usage):
