@@ -200,6 +200,59 @@ class PoolDiagnosticsSimulatedTests(unittest.TestCase):
         finally:
             pool_diagnostics.POOL_SCANNER_DATA_DIR = original_data_dir
 
+    def test_build_state_from_observations_recovers_empty_state_report(self):
+        original_data_dir = pool_diagnostics.DIAGNOSTICS_DATA_DIR
+        try:
+            with tempfile.TemporaryDirectory() as temporary_directory:
+                pool_diagnostics.DIAGNOSTICS_DATA_DIR = Path(temporary_directory)
+                observation_file = (
+                    pool_diagnostics.DIAGNOSTICS_DATA_DIR
+                    / "observations_2026-06-01.jsonl"
+                )
+                first_seen = {
+                    "observed_at_utc": "2026-06-01T12:01:02Z",
+                    "observation_type": "first_seen",
+                    "target_age_minutes": None,
+                    "task_id": f"ethereum:{POOL}",
+                    "chain": "ethereum",
+                    "source": "uniswap_v3",
+                    "token_address": TOKEN,
+                    "quote_token": "WETH",
+                    "quote_token_address": WETH,
+                    "pool_address": POOL,
+                    "pool_id": None,
+                    "lookup_mode": "exact_pool_address",
+                    "association_precision": "exact_pool",
+                    "pool_created_at_utc": "2026-06-01T12:00:00Z",
+                    "age_seconds": 62,
+                    "found_on_dexscreener": True,
+                    "error": None,
+                    "pair": make_pair(),
+                }
+                snapshot = dict(first_seen)
+                snapshot.update(
+                    {
+                        "observed_at_utc": "2026-06-01T12:05:03Z",
+                        "observation_type": "snapshot",
+                        "target_age_minutes": 5,
+                        "age_seconds": 303,
+                    }
+                )
+                observation_file.write_text(
+                    json.dumps(first_seen) + "\n" + json.dumps(snapshot) + "\n",
+                    encoding="utf-8",
+                )
+
+                state = pool_diagnostics.build_state_from_observations([5, 15, 30], 45)
+
+                self.assertEqual(state["report_source"], "observations_recovered")
+                self.assertEqual(len(state["tasks"]), 1)
+                task = state["tasks"][f"ethereum:{POOL}"]
+                self.assertEqual(task["first_seen_delay_seconds"], 62)
+                self.assertIn("5", task["snapshots"])
+        finally:
+            pool_diagnostics.DIAGNOSTICS_DATA_DIR = original_data_dir
+
 
 if __name__ == "__main__":
     unittest.main()

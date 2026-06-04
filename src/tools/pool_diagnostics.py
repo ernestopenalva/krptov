@@ -5,7 +5,7 @@ import signal
 import statistics
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -24,6 +24,7 @@ DEFAULT_SNAPSHOT_MINUTES = (5, 15, 30)
 DEFAULT_EXPIRY_MINUTES = 45
 DEFAULT_LOOKBACK_SECONDS = 120
 REQUEST_TIMEOUT_SECONDS = 20
+BRASILIA_TZ = timezone(timedelta(hours=-3))
 
 stop_requested = False
 
@@ -81,6 +82,17 @@ def utc_now_iso():
 
 def parse_iso(value):
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def format_time_context(value):
+    if not value:
+        return "n/a"
+    utc_value = parse_iso(value)
+    brasilia_value = utc_value.astimezone(BRASILIA_TZ)
+    return (
+        f"{utc_value.isoformat(timespec='seconds').replace('+00:00', 'Z')} UTC | "
+        f"{brasilia_value.isoformat(timespec='seconds')} Brasilia"
+    )
 
 
 def timestamp_iso(timestamp):
@@ -164,6 +176,97 @@ def load_state(snapshot_minutes, expiry_minutes, new_session=False):
         return state, True
 
     return create_state(snapshot_minutes, expiry_minutes), False
+
+
+def observation_files():
+    return sorted(DIAGNOSTICS_DATA_DIR.glob("observations_*.jsonl"))
+
+
+def load_observations():
+    observations = []
+    for path in observation_files():
+        with path.open("r", encoding="utf-8") as file:
+            for line_number, line in enumerate(file, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    observations.append(json.loads(line))
+                except json.JSONDecodeError:
+                    print(f"Observacao invalida ignorada: {path.name}:{line_number}")
+    return observations
+
+
+def build_state_from_observations(snapshot_minutes, expiry_minutes):
+    observations = load_observations()
+    if not observations:
+        return None
+
+    state = create_state(snapshot_minutes, expiry_minutes)
+    observed_times = [
+        observation.get("observed_at_utc")
+        for observation in observations
+        if observation.get("observed_at_utc")
+    ]
+    if observed_times:
+        state["session_started_at_utc"] = min(observed_times)
+        state["updated_at_utc"] = max(observed_times)
+    state["report_source"] = "observations_recovered"
+
+    for observation in observations:
+        task_id = observation.get("task_id")
+        if not task_id:
+            continue
+
+        task = state["tasks"].setdefault(
+            task_id,
+            {
+                "task_id": task_id,
+                "chain": observation.get("chain"),
+                "source": observation.get("source"),
+                "source_type": observation.get("source_type"),
+                "token_address": observation.get("token_address"),
+                "quote_token": observation.get("quote_token"),
+                "quote_token_address": observation.get("quote_token_address"),
+                "pool_address": observation.get("pool_address"),
+                "pool_id": observation.get("pool_id"),
+                "pool_manager_address": observation.get("pool_manager_address"),
+                "pool_created_at_utc": observation.get("pool_created_at_utc"),
+                "pool_created_at_source": None,
+                "scanner_received_at_utc": None,
+                "lookup_mode": observation.get("lookup_mode"),
+                "association_precision": observation.get("association_precision"),
+                "first_seen_on_dexscreener_at_utc": None,
+                "first_seen_delay_seconds": None,
+                "last_polled_at_utc": observation.get("observed_at_utc"),
+                "snapshots": {},
+                "completed_at_utc": None,
+                "completion_reason": None,
+            },
+        )
+
+        observed_at = observation.get("observed_at_utc")
+        if observed_at and (
+            not task.get("last_polled_at_utc")
+            or observed_at > task["last_polled_at_utc"]
+        ):
+            task["last_polled_at_utc"] = observed_at
+
+        if observation.get("observation_type") == "first_seen":
+            delay_seconds = observation.get("age_seconds")
+            current_delay = task.get("first_seen_delay_seconds")
+            if delay_seconds is not None and (
+                current_delay is None or delay_seconds < current_delay
+            ):
+                task["first_seen_on_dexscreener_at_utc"] = observed_at
+                task["first_seen_delay_seconds"] = delay_seconds
+
+        if observation.get("observation_type") == "snapshot":
+            target_minutes = observation.get("target_age_minutes")
+            if target_minutes is not None:
+                snapshot_key = str(target_minutes)
+                task["snapshots"].setdefault(snapshot_key, observation)
+
+    return state
 
 
 def event_created_at(scanner_event):
@@ -514,7 +617,11 @@ def print_report(state):
 
     print()
     print("=== KRPTO-V | Pool Diagnostics | Relatorio ===")
-    print(f"Sessao iniciada: {state['session_started_at_utc']}")
+    if state.get("report_source") == "observations_recovered":
+        print("Fonte do relatorio: observations_*.jsonl recuperado")
+    print(f"Sessao iniciada: {format_time_context(state['session_started_at_utc'])}")
+    if state.get("updated_at_utc"):
+        print(f"Ultima atualizacao: {format_time_context(state['updated_at_utc'])}")
     print(f"Pools acompanhados: {len(tasks)}")
     print(f"Encontrados na Dexscreener: {len(found_tasks)}")
     print(f"Ainda nao encontrados: {len(tasks) - len(found_tasks)}")
@@ -538,7 +645,7 @@ def print_report(state):
             for task in tasks
             if str(minute) in task["snapshots"]
         ]
-        found = [item for item in snapshots if item["found_on_dexscreener"]]
+        found = [item for item in snapshots if item["found_on_dexscreener"] and item.get("pair")]
         liquidities = [item["pair"]["liquidity_usd"] for item in found]
         volumes = [item["pair"]["volume_h24_usd"] for item in found]
         with_liquidity = sum(value > 0 for value in liquidities)
@@ -582,6 +689,13 @@ def run(args):
     )
 
     if args.report_only:
+        if not state.get("tasks"):
+            recovered_state = build_state_from_observations(
+                snapshot_minutes=snapshot_minutes,
+                expiry_minutes=args.expiry_minutes,
+            )
+            if recovered_state and recovered_state.get("tasks"):
+                state = recovered_state
         print_report(state)
         return
 
