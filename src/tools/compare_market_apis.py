@@ -35,6 +35,7 @@ DEXPAPRIKA_TOKEN_POOLS_URL = "https://api.dexpaprika.com/networks/{network}/toke
 
 REQUEST_TIMEOUT_SECONDS = 20
 DEFAULT_SLEEP_SECONDS = 0.35
+DEFAULT_RETRIES = 3
 DEFAULT_APIS = ("dexscreener", "geckoterminal", "dexpaprika")
 
 GECKOTERMINAL_NETWORKS = {
@@ -81,6 +82,12 @@ def parse_args():
         type=float,
         default=DEFAULT_SLEEP_SECONDS,
         help="Pausa entre chamadas para reduzir risco de rate limit. Padrao: 0.35.",
+    )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=DEFAULT_RETRIES,
+        help="Tentativas extras para 429/rate limit. Padrao: 3.",
     )
     parser.add_argument(
         "--output",
@@ -285,7 +292,44 @@ def choose_best(candidates, case, liquidity_getter, created_getter, address_gett
     )
 
 
-def get_json(session, url):
+def retry_after_seconds(error, attempt):
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", {}) or {}
+    retry_after = headers.get("Retry-After")
+    if retry_after:
+        try:
+            return max(1.0, float(retry_after))
+        except ValueError:
+            pass
+    return min(10.0, 1.5 * (attempt + 1))
+
+
+def get_json(session, url, cache=None, retries=DEFAULT_RETRIES):
+    if cache is not None and url in cache:
+        return cache[url]
+
+    last_error = None
+    for attempt in range(retries + 1):
+        if attempt > 0:
+            time.sleep(retry_after_seconds(last_error, attempt - 1))
+
+        try:
+            response = session.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+            response.raise_for_status()
+            payload = response.json()
+            if cache is not None:
+                cache[url] = payload
+            return payload
+        except requests.RequestException as error:
+            last_error = error
+            status_code = getattr(getattr(error, "response", None), "status_code", None)
+            if status_code != 429:
+                raise
+
+    raise last_error
+
+
+def get_json_no_retry(session, url):
     response = session.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
     response.raise_for_status()
     return response.json()
@@ -305,13 +349,13 @@ def normalize_dexscreener_pair(pair):
     }
 
 
-def query_dexscreener(case, session=requests):
+def query_dexscreener(case, session=requests, cache=None, retries=DEFAULT_RETRIES):
     if case["pool_address"]:
         url = DEXSCREENER_PAIR_URL.format(
             chain=case["chain"],
             pool_address=case["pool_address"],
         )
-        payload = get_json(session, url)
+        payload = get_json(session, url, cache=cache, retries=retries)
         pairs = payload.get("pairs") or []
         pair = next(
             (
@@ -326,7 +370,7 @@ def query_dexscreener(case, session=requests):
             chain=case["chain"],
             token_address=case["token_address"],
         )
-        pairs = get_json(session, url) or []
+        pairs = get_json(session, url, cache=cache, retries=retries) or []
         pair = choose_best(
             pairs,
             case,
@@ -355,14 +399,14 @@ def normalize_gecko_pair(resource):
     }
 
 
-def query_geckoterminal(case, session=requests):
+def query_geckoterminal(case, session=requests, cache=None, retries=DEFAULT_RETRIES):
     network = GECKOTERMINAL_NETWORKS.get(case["chain"], case["chain"])
     if case["pool_address"]:
         url = GECKOTERMINAL_POOL_URL.format(
             network=network,
             pool_address=case["pool_address"],
         )
-        payload = get_json(session, url)
+        payload = get_json(session, url, cache=cache, retries=retries)
         pair = payload.get("data")
         query_mode = "exact_pool"
     else:
@@ -370,7 +414,7 @@ def query_geckoterminal(case, session=requests):
             network=network,
             token_address=case["token_address"],
         )
-        payload = get_json(session, url)
+        payload = get_json(session, url, cache=cache, retries=retries)
         pairs = payload.get("data") or []
         pair = choose_best(
             pairs,
@@ -413,21 +457,21 @@ def extract_paprika_pools(payload):
     return []
 
 
-def query_dexpaprika(case, session=requests):
+def query_dexpaprika(case, session=requests, cache=None, retries=DEFAULT_RETRIES):
     network = DEXPAPRIKA_NETWORKS.get(case["chain"], case["chain"])
     if case["pool_address"]:
         url = DEXPAPRIKA_POOL_URL.format(
             network=network,
             pool_address=case["pool_address"],
         )
-        pair = get_json(session, url)
+        pair = get_json(session, url, cache=cache, retries=retries)
         query_mode = "exact_pool"
     else:
         url = DEXPAPRIKA_TOKEN_POOLS_URL.format(
             network=network,
             token_address=case["token_address"],
         )
-        payload = get_json(session, url)
+        payload = get_json(session, url, cache=cache, retries=retries)
         pairs = extract_paprika_pools(payload)
         pair = choose_best(
             pairs,
@@ -468,11 +512,16 @@ QUERY_FUNCTIONS = {
 }
 
 
-def compare_case(case, apis, session=requests):
+def compare_case(case, apis, session=requests, cache=None, retries=DEFAULT_RETRIES):
     api_results = {}
     for api_name in apis:
         try:
-            api_results[api_name] = QUERY_FUNCTIONS[api_name](case, session=session)
+            api_results[api_name] = QUERY_FUNCTIONS[api_name](
+                case,
+                session=session,
+                cache=cache,
+                retries=retries,
+            )
         except requests.RequestException as error:
             api_results[api_name] = {
                 "api": api_name,
@@ -576,6 +625,7 @@ def main():
 
     output_path = output_path_from_args(args)
     results = []
+    response_cache = {}
 
     print(f"Casos carregados: {len(events)}")
     print(f"APIs: {', '.join(apis)}")
@@ -587,7 +637,12 @@ def main():
             f"[{index}/{len(events)}] {case['source']} | {case['token_address']} | "
             f"{case['pool_address'] or case['pool_id']}"
         )
-        result = compare_case(case, apis)
+        result = compare_case(
+            case,
+            apis,
+            cache=response_cache,
+            retries=args.retries,
+        )
         append_jsonl(output_path, result)
         results.append(result)
         if args.sleep_seconds > 0:
