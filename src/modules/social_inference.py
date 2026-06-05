@@ -11,6 +11,8 @@ import requests
 from dotenv import load_dotenv
 from requests import HTTPError
 
+from src.modules import telegram_notifier
+
 
 X_SEARCH_RECENT_URL = "https://api.x.com/2/tweets/search/recent"
 X_USER_BY_USERNAME_URL = "https://api.x.com/2/users/by/username/{username}"
@@ -25,6 +27,8 @@ STATUS_REASON_SOCIAL_TIMEOUT = "social_timeout"
 SOCIAL_STATUS_PENDENTE = "pendente"
 SOCIAL_STATUS_ATIVO = "ativo"
 SOCIAL_STATUS_CONCLUIDO = "concluido"
+SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET = "blocked_old_market"
+SOCIAL_SKIP_REASON_OLD_MARKET = "social_eligibility_blocked_old_market"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
@@ -73,6 +77,12 @@ DEFAULT_CONFIG = {
         "high": 20000,
         "critical": 100000,
     },
+    "telegram_alerts": {
+        "enabled": True,
+        "dry_run": False,
+        "parse_mode": "HTML",
+        "timeout_seconds": 20,
+    },
 }
 
 
@@ -120,10 +130,11 @@ def merge_dict(base, updates):
     return merged
 
 
-def load_simple_yaml_social_inference(config_file):
-    config = {}
+def load_simple_yaml_sections(config_file, section_names):
+    sections = {section_name: {} for section_name in section_names}
+    config = None
     stack = []
-    in_social = False
+    current_section = None
     list_key = None
 
     for raw_line in config_file.read_text(encoding="utf-8").splitlines():
@@ -135,16 +146,22 @@ def load_simple_yaml_social_inference(config_file):
         stripped = line_without_comment.strip()
         indent = len(raw_line) - len(raw_line.lstrip(" "))
 
-        if stripped == "social_inference:":
-            in_social = True
-            stack = [(0, config)]
+        if indent == 0 and stripped.endswith(":"):
+            section_name = stripped[:-1]
+            if section_name in sections:
+                current_section = section_name
+                config = sections[section_name]
+                stack = [(0, config)]
+                list_key = None
+                continue
+
+            current_section = None
+            config = None
+            stack = []
             list_key = None
             continue
 
-        if in_social and indent == 0 and not raw_line.startswith((" ", "\t")):
-            break
-
-        if not in_social:
+        if not current_section:
             continue
 
         if stripped.startswith("- "):
@@ -176,10 +193,15 @@ def load_simple_yaml_social_inference(config_file):
         current[key] = parse_config_value(value)
         list_key = None
 
-    if isinstance(config.get("bio_patterns"), dict):
-        config["bio_patterns"] = []
+    for loaded_config in sections.values():
+        if isinstance(loaded_config.get("bio_patterns"), dict):
+            loaded_config["bio_patterns"] = []
 
-    return config
+    return sections
+
+
+def load_simple_yaml_social_inference(config_file):
+    return load_simple_yaml_sections(config_file, {"social_inference"}).get("social_inference", {})
 
 
 def load_config(config_file=CONFIG_FILE):
@@ -188,8 +210,13 @@ def load_config(config_file=CONFIG_FILE):
     if not Path(config_file).exists():
         return config
 
-    loaded = load_simple_yaml_social_inference(Path(config_file))
-    return merge_dict(config, loaded)
+    loaded_sections = load_simple_yaml_sections(Path(config_file), {"social_inference", "telegram_alerts"})
+    config = merge_dict(config, loaded_sections.get("social_inference", {}))
+    config["telegram_alerts"] = merge_dict(
+        config.get("telegram_alerts", {}),
+        loaded_sections.get("telegram_alerts", {}),
+    )
+    return config
 
 
 def ensure_directories():
@@ -430,6 +457,10 @@ def build_social_candidates(watchlist, config):
         limited.append(candidate)
 
     return limited
+
+
+def is_social_eligibility_blocked(entry):
+    return entry.get("social_eligibility") == SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET
 
 
 def load_bearer_token():
@@ -1120,7 +1151,12 @@ def build_alert(
         "raw_alert_posts_file": raw_alert_posts_file,
         "social_monitoring_started_at": entry.get("social_monitoring_started_at"),
         "social_monitoring_expires_at": entry.get("social_monitoring_expires_at"),
-        "telegram_alert_sent": True,
+        "telegram_alert_sent": bool(entry.get("telegram_alert_sent", False)),
+        "telegram_alert_sent_at": entry.get("telegram_alert_sent_at"),
+        "telegram_message_id": entry.get("telegram_message_id"),
+        "telegram_alert_signature": entry.get("telegram_alert_signature"),
+        "telegram_alert_error": entry.get("telegram_alert_error"),
+        "telegram_alert_attempted_at": entry.get("telegram_alert_attempted_at"),
     }
 
 
@@ -1192,11 +1228,26 @@ def register_new_social_token_started(token_address, current_time, usage, chain_
 def should_generate_alert(entry, analysis):
     current_rank = int(analysis["alert_rank"] or 0)
     best_rank = int(entry.get("best_alert_rank") or 0)
-    return current_rank > best_rank
+    current_signature = analysis.get("alert_signature")
+
+    if current_rank <= 0:
+        return False
+    if current_rank > best_rank:
+        return True
+    if current_rank != best_rank:
+        return False
+    if entry.get("telegram_alert_sent") is True and entry.get("telegram_alert_signature") == current_signature:
+        return False
+
+    previous_attempt_failed = (
+        entry.get("telegram_alert_attempted_at")
+        and entry.get("telegram_alert_sent") is not True
+        and entry.get("last_alert_signature") == current_signature
+    )
+    return bool(previous_attempt_failed)
 
 
 def apply_alert(entry, analysis, current_time):
-    entry["telegram_alert_sent"] = True
     entry["last_alert_at"] = to_iso(current_time)
     entry["last_alert_level"] = analysis["alert_rank"]
     entry["last_alert_reason"] = "; ".join(analysis["alert_reasons"])
@@ -1206,6 +1257,53 @@ def apply_alert(entry, analysis, current_time):
     )
     entry["best_alert_rank"] = analysis["alert_rank"]
     entry["last_alert_signature"] = analysis["alert_signature"]
+
+
+def should_send_telegram_alert(entry, analysis):
+    return not (
+        entry.get("telegram_alert_sent") is True
+        and entry.get("telegram_alert_signature") == analysis.get("alert_signature")
+    )
+
+
+def apply_telegram_result(entry, alert, analysis, result, current_time):
+    attempted_at = to_iso(current_time)
+    alert["telegram_alert_attempted_at"] = attempted_at
+    entry["telegram_alert_attempted_at"] = attempted_at
+
+    if result.get("success"):
+        message_id = result.get("message_id")
+        sent_at = result.get("sent_at") or attempted_at
+        entry["telegram_alert_sent"] = True
+        entry["telegram_alert_sent_at"] = sent_at
+        entry["telegram_message_id"] = message_id
+        entry["telegram_alert_signature"] = analysis.get("alert_signature")
+        entry.pop("telegram_alert_error", None)
+
+        alert["telegram_alert_sent"] = True
+        alert["telegram_alert_sent_at"] = sent_at
+        alert["telegram_message_id"] = message_id
+        alert["telegram_alert_signature"] = analysis.get("alert_signature")
+        alert.pop("telegram_alert_error", None)
+        return
+
+    error = result.get("error") or "erro desconhecido"
+    entry["telegram_alert_sent"] = False
+    entry["telegram_alert_error"] = error
+    entry["telegram_alert_signature"] = analysis.get("alert_signature")
+
+    alert["telegram_alert_sent"] = False
+    alert["telegram_alert_error"] = error
+    alert["telegram_alert_signature"] = analysis.get("alert_signature")
+
+
+def mark_telegram_disabled(entry, alert, analysis):
+    entry["telegram_alert_sent"] = False
+    entry["telegram_alert_signature"] = analysis.get("alert_signature")
+
+    alert["telegram_alert_sent"] = False
+    alert["telegram_alert_signature"] = analysis.get("alert_signature")
+    alert["telegram_alert_error"] = "telegram_alerts.enabled=false"
 
 
 def build_history_record(token_address, status_before, entry, analysis, alert_generated, current_time, watchlist_key=None):
@@ -1256,6 +1354,7 @@ def social_managed_update(entry):
         "social_total_posts_seen",
         "social_tracked_tweet_ids",
         "social_tracked_posts_count",
+        "telegram_message_id",
     }
     update = {
         key: value
@@ -1315,6 +1414,7 @@ def print_summary(snapshot):
         f"Alertas gerados: {snapshot['alerts_generated']}",
         f"Tokens expirados: {snapshot['tokens_expired']}",
         f"Tokens bloqueados pelo limite diario: {snapshot.get('tokens_blocked_by_daily_limit', 0)}",
+        f"Tokens bloqueados por social_eligibility: {snapshot.get('tokens_blocked_by_social_eligibility', 0)}",
         f"Erros: {len(snapshot['errors'])}",
     ]
 
@@ -1342,6 +1442,7 @@ def run_cycle(config_file=CONFIG_FILE):
             "alerts_generated": 0,
             "tokens_expired": 0,
             "tokens_blocked_by_daily_limit": 0,
+            "tokens_blocked_by_social_eligibility": 0,
             "errors": [],
         }
         atomic_save_json(LATEST_SNAPSHOT_FILE, snapshot)
@@ -1359,6 +1460,7 @@ def run_cycle(config_file=CONFIG_FILE):
             "alerts_generated": 0,
             "tokens_expired": 0,
             "tokens_blocked_by_daily_limit": 0,
+            "tokens_blocked_by_social_eligibility": 0,
             "errors": [error],
         }
         atomic_save_json(LATEST_SNAPSHOT_FILE, snapshot)
@@ -1368,10 +1470,13 @@ def run_cycle(config_file=CONFIG_FILE):
 
     alerts = load_alerts()
     daily_usage = load_daily_usage(current_time)
+    telegram_config = config.get("telegram_alerts") or {}
+    telegram_env = telegram_notifier.load_telegram_env(PROJECT_ROOT / ".env")
     tokens_checked = 0
     alerts_generated = 0
     tokens_expired = 0
     tokens_blocked_by_daily_limit = 0
+    tokens_blocked_by_social_eligibility = 0
     with watchlist_lock():
         watchlist = load_watchlist(WATCHLIST_FILE)
         social_candidates = build_social_candidates(watchlist, config)
@@ -1384,12 +1489,6 @@ def run_cycle(config_file=CONFIG_FILE):
             status_before = entry.get("status")
 
             starting_new_social_token = status_before == STATUS_NOVO or needs_social_monitoring_start(entry)
-            if starting_new_social_token and not can_start_new_social_token(config, daily_usage):
-                entry["social_last_skipped_at"] = now_text
-                entry["social_skip_reason"] = "daily_new_token_limit"
-                tokens_blocked_by_daily_limit += 1
-                continue
-
             expires_at = parse_iso(entry.get("social_monitoring_expires_at"))
             if status_before == STATUS_ATIVO and expires_at and current_time >= expires_at:
                 expire_social_monitoring(entry, current_time)
@@ -1404,6 +1503,18 @@ def run_cycle(config_file=CONFIG_FILE):
                     watchlist_key=watchlist_key,
                 )
                 append_jsonl(DATA_DIR / f"social_inference_{date_stamp}.jsonl", history_record)
+                continue
+
+            if is_social_eligibility_blocked(entry):
+                entry["social_last_skipped_at"] = now_text
+                entry["social_skip_reason"] = SOCIAL_SKIP_REASON_OLD_MARKET
+                tokens_blocked_by_social_eligibility += 1
+                continue
+
+            if starting_new_social_token and not can_start_new_social_token(config, daily_usage):
+                entry["social_last_skipped_at"] = now_text
+                entry["social_skip_reason"] = "daily_new_token_limit"
+                tokens_blocked_by_daily_limit += 1
                 continue
 
             try:
@@ -1474,6 +1585,24 @@ def run_cycle(config_file=CONFIG_FILE):
                     watchlist_key=watchlist_key,
                     raw_alert_posts_file=raw_alert_posts_file,
                 )
+                if telegram_config.get("enabled", True):
+                    if should_send_telegram_alert(entry, analysis):
+                        telegram_result = telegram_notifier.send_alert(
+                            alert,
+                            entry=entry,
+                            config=telegram_config,
+                            env=telegram_env,
+                        )
+                        apply_telegram_result(entry, alert, analysis, telegram_result, current_time)
+                        if not telegram_result.get("success"):
+                            errors.append(f"{normalized_address}: Telegram {telegram_result.get('error')}")
+                    else:
+                        alert["telegram_alert_sent"] = True
+                        alert["telegram_alert_signature"] = analysis.get("alert_signature")
+                        alert["telegram_alert_sent_at"] = entry.get("telegram_alert_sent_at")
+                        alert["telegram_message_id"] = entry.get("telegram_message_id")
+                else:
+                    mark_telegram_disabled(entry, alert, analysis)
                 alerts.append(alert)
                 append_jsonl(DATA_DIR / f"social_alerts_{date_stamp}.jsonl", alert)
                 alerts_generated += 1
@@ -1506,6 +1635,7 @@ def run_cycle(config_file=CONFIG_FILE):
         "alerts_generated": alerts_generated,
         "tokens_expired": tokens_expired,
         "tokens_blocked_by_daily_limit": tokens_blocked_by_daily_limit,
+        "tokens_blocked_by_social_eligibility": tokens_blocked_by_social_eligibility,
         "errors": errors,
     }
 

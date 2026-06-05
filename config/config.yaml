@@ -48,3 +48,9 @@ social_inference:
     medium: 2000
     high: 20000
     critical: 100000
+
+telegram_alerts:
+  enabled: true
+  dry_run: false
+  parse_mode: "HTML"
+  timeout_seconds: 20

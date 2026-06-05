@@ -16,7 +16,11 @@ if "requests" not in sys.modules:
     class RequestException(Exception):
         pass
 
+    class HTTPError(RequestException):
+        pass
+
     requests.RequestException = RequestException
+    requests.HTTPError = HTTPError
     sys.modules["requests"] = requests
 
 spec = importlib.util.spec_from_file_location(

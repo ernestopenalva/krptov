@@ -23,6 +23,13 @@ REQUEST_TIMEOUT_SECONDS = 20
 
 STATUS_NOVO = "novo"
 STATUS_ATIVO = "ativo"
+SOCIAL_ELIGIBILITY_PENDING = "pending"
+SOCIAL_ELIGIBILITY_ELIGIBLE = "eligible"
+SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET = "blocked_old_market"
+SOCIAL_ELIGIBILITY_REASON_PENDING_DEX = "pending_dexscreener"
+SOCIAL_ELIGIBILITY_REASON_FRESH_MARKET = "fresh_market"
+SOCIAL_ELIGIBILITY_REASON_OLD_MARKET = "old_market"
+SOCIAL_ELIGIBILITY_MAX_MARKET_AGE_HOURS = 24
 
 WEIGHT_LIQUIDITY = 5
 WEIGHT_VOLUME = 4
@@ -269,6 +276,82 @@ def select_best_pair(pairs, entry):
     return max(pairs, key=liquidity_usd), "token_level"
 
 
+def pair_created_at_datetime(pair):
+    if not isinstance(pair, dict):
+        return None
+
+    try:
+        value = int(pair.get("pairCreatedAt") or 0)
+    except (TypeError, ValueError):
+        return None
+
+    if value <= 0:
+        return None
+
+    return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+
+
+def pair_created_at_iso(pair):
+    created_at = pair_created_at_datetime(pair)
+    return to_iso(created_at) if created_at else None
+
+
+def select_oldest_pair(pairs):
+    dated_pairs = [
+        (pair_created_at_datetime(pair), pair)
+        for pair in pairs
+        if pair_created_at_datetime(pair)
+    ]
+    if not dated_pairs:
+        return None
+
+    return min(dated_pairs, key=lambda item: item[0])[1]
+
+
+def calculate_social_eligibility(pairs, selected_pair, current_time):
+    if not selected_pair:
+        return {
+            "social_eligibility": SOCIAL_ELIGIBILITY_PENDING,
+            "social_eligibility_reason": SOCIAL_ELIGIBILITY_REASON_PENDING_DEX,
+            "oldest_pair_created_at_utc": None,
+            "oldest_pair_age_minutes": None,
+            "selected_pair_created_at_utc": None,
+        }
+
+    oldest_pair = select_oldest_pair(pairs)
+    oldest_created_at = pair_created_at_datetime(oldest_pair)
+    selected_created_at = pair_created_at_datetime(selected_pair)
+
+    if not oldest_created_at:
+        return {
+            "social_eligibility": SOCIAL_ELIGIBILITY_PENDING,
+            "social_eligibility_reason": SOCIAL_ELIGIBILITY_REASON_PENDING_DEX,
+            "oldest_pair_created_at_utc": None,
+            "oldest_pair_age_minutes": None,
+            "selected_pair_created_at_utc": pair_created_at_iso(selected_pair),
+        }
+
+    oldest_age_minutes = max(0, (current_time - oldest_created_at).total_seconds() / 60)
+    max_age_minutes = SOCIAL_ELIGIBILITY_MAX_MARKET_AGE_HOURS * 60
+    is_old_market = oldest_age_minutes > max_age_minutes
+
+    return {
+        "social_eligibility": (
+            SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET
+            if is_old_market
+            else SOCIAL_ELIGIBILITY_ELIGIBLE
+        ),
+        "social_eligibility_reason": (
+            SOCIAL_ELIGIBILITY_REASON_OLD_MARKET
+            if is_old_market
+            else SOCIAL_ELIGIBILITY_REASON_FRESH_MARKET
+        ),
+        "oldest_pair_created_at_utc": to_iso(oldest_created_at),
+        "oldest_pair_age_minutes": round(oldest_age_minutes, 2),
+        "selected_pair_created_at_utc": to_iso(selected_created_at) if selected_created_at else None,
+    }
+
+
 def component_liquidity(value):
     if value >= 10000:
         return 100
@@ -401,7 +484,20 @@ def pair_summary(pair):
     }
 
 
-def build_snapshot(token, dex_status, pairs_count, selected_pair, association_type, market_score, components, metrics, state_item, current_time, error=None):
+def build_snapshot(
+    token,
+    dex_status,
+    pairs_count,
+    selected_pair,
+    association_type,
+    market_score,
+    components,
+    metrics,
+    social_eligibility,
+    state_item,
+    current_time,
+    error=None,
+):
     return {
         "timestamp": to_iso(current_time),
         "ranker_version": MARKET_RANKER_VERSION,
@@ -415,6 +511,7 @@ def build_snapshot(token, dex_status, pairs_count, selected_pair, association_ty
         "market_score": market_score,
         "score_components": components,
         "observed_metrics": metrics,
+        "social_eligibility": social_eligibility,
         "selected_pair": pair_summary(selected_pair),
         "first_seen_by_ranker_at_utc": state_item.get("first_seen_by_ranker_at_utc"),
         "first_dex_found_at_utc": state_item.get("first_dex_found_at_utc"),
@@ -424,16 +521,16 @@ def build_snapshot(token, dex_status, pairs_count, selected_pair, association_ty
     }
 
 
-def update_watchlist_scores(scores_by_key):
-    if not scores_by_key:
+def update_watchlist_market_fields(updates_by_key):
+    if not updates_by_key:
         return
 
     with watchlist_lock():
         watchlist = load_watchlist()
-        for watchlist_key, market_score in scores_by_key.items():
+        for watchlist_key, update in updates_by_key.items():
             entry = watchlist.get(watchlist_key)
             if isinstance(entry, dict):
-                entry["market_score"] = market_score
+                entry.update(update)
         atomic_save_json(WATCHLIST_FILE, watchlist)
 
 
@@ -490,7 +587,7 @@ def run_cycle(dry_run=False, session=requests):
     rankable_tokens = select_rankable_tokens(watchlist)
 
     results = []
-    scores_by_key = {}
+    updates_by_key = {}
     dex_found = 0
     dex_not_found = 0
     errors = 0
@@ -503,11 +600,23 @@ def run_cycle(dry_run=False, session=requests):
         market_score = None
         components = None
         metrics = None
+        social_eligibility = {
+            "social_eligibility": SOCIAL_ELIGIBILITY_PENDING,
+            "social_eligibility_reason": SOCIAL_ELIGIBILITY_REASON_PENDING_DEX,
+            "oldest_pair_created_at_utc": None,
+            "oldest_pair_age_minutes": None,
+            "selected_pair_created_at_utc": None,
+        }
         error_text = None
 
         try:
             pairs = fetch_token_pairs(token["chain"], token["token_address"], session=session)
             selected_pair, association_type = select_best_pair(pairs, token["entry"])
+            social_eligibility = calculate_social_eligibility(
+                pairs,
+                selected_pair,
+                current_time,
+            )
             if selected_pair:
                 dex_status = "found"
                 market_score, components, metrics = calculate_market_score(
@@ -515,10 +624,20 @@ def run_cycle(dry_run=False, session=requests):
                     token["entry"],
                     current_time,
                 )
-                scores_by_key[token["watchlist_key"]] = market_score
                 dex_found += 1
             else:
                 dex_not_found += 1
+
+            updates_by_key[token["watchlist_key"]] = {
+                "social_eligibility": social_eligibility["social_eligibility"],
+                "social_eligibility_reason": social_eligibility["social_eligibility_reason"],
+                "social_eligibility_updated_at": now_text,
+                "oldest_pair_created_at_utc": social_eligibility["oldest_pair_created_at_utc"],
+                "oldest_pair_age_minutes": social_eligibility["oldest_pair_age_minutes"],
+                "selected_pair_created_at_utc": social_eligibility["selected_pair_created_at_utc"],
+            }
+            if market_score is not None:
+                updates_by_key[token["watchlist_key"]]["market_score"] = market_score
         except Exception as error:
             dex_status = "error"
             error_text = str(error)
@@ -540,6 +659,7 @@ def run_cycle(dry_run=False, session=requests):
             market_score=market_score,
             components=components,
             metrics=metrics,
+            social_eligibility=social_eligibility,
             state_item=state_item,
             current_time=current_time,
             error=error_text,
@@ -550,7 +670,7 @@ def run_cycle(dry_run=False, session=requests):
     atomic_save_json(STATE_FILE, state)
 
     if not dry_run:
-        update_watchlist_scores(scores_by_key)
+        update_watchlist_market_fields(updates_by_key)
 
     summary = {
         "timestamp": now_text,
