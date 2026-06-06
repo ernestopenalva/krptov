@@ -2,24 +2,32 @@ import argparse
 import json
 import os
 import time
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
 
+from src.modules import telegram_notifier
+
 
 MARKET_RANKER_VERSION = "krptov-market-ranker-v1-2026-06-03"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
 DATA_DIR = PROJECT_ROOT / "data"
 MARKET_RANKER_DATA_DIR = DATA_DIR / "market_ranker"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 WATCHLIST_LOCK_FILE = DATA_DIR / "watchlist.lock"
 STATE_FILE = MARKET_RANKER_DATA_DIR / "state.json"
+OPS_ALERT_STATE_FILE = MARKET_RANKER_DATA_DIR / "ops_alert_state.json"
 
 DEXSCREENER_TOKEN_PAIRS_URL = "https://api.dexscreener.com/token-pairs/v1/{chain}/{token_address}"
+DEXSCREENER_TOKENS_URL = "https://api.dexscreener.com/tokens/v1/{chain}/{token_addresses}"
 REQUEST_TIMEOUT_SECONDS = 20
+OPS_ALERT_DEFAULT_COOLDOWN_SECONDS = 1800
+DEXSCREENER_MAX_BATCH_TOKENS = 30
 
 STATUS_NOVO = "novo"
 STATUS_ATIVO = "ativo"
@@ -36,6 +44,13 @@ WEIGHT_VOLUME = 4
 WEIGHT_TXNS = 3
 WEIGHT_AGE = 5
 TOTAL_WEIGHT = WEIGHT_LIQUIDITY + WEIGHT_VOLUME + WEIGHT_TXNS + WEIGHT_AGE
+
+DEFAULT_CONFIG = {
+    "ops_alerts": {
+        "enabled": True,
+        "cooldown_seconds": OPS_ALERT_DEFAULT_COOLDOWN_SECONDS,
+    },
+}
 
 
 def utc_now():
@@ -60,6 +75,91 @@ def parse_iso(value):
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def parse_config_value(value):
+    value = value.strip()
+
+    if value.lower() == "true":
+        return True
+    if value.lower() == "false":
+        return False
+
+    try:
+        return int(value)
+    except ValueError:
+        return value.strip('"').strip("'")
+
+
+def merge_dict(base, updates):
+    merged = base.copy()
+
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_dict(merged[key], value)
+            continue
+        merged[key] = value
+
+    return merged
+
+
+def load_simple_yaml_sections(config_file, section_names):
+    sections = {section_name: {} for section_name in section_names}
+    current_section = None
+    stack = []
+
+    if not Path(config_file).exists():
+        return sections
+
+    for raw_line in Path(config_file).read_text(encoding="utf-8").splitlines():
+        line_without_comment = raw_line.split("#", 1)[0].rstrip()
+
+        if not line_without_comment:
+            continue
+
+        stripped = line_without_comment.strip()
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+
+        if indent == 0 and stripped.endswith(":"):
+            section_name = stripped[:-1]
+            if section_name in sections:
+                current_section = section_name
+                stack = [(0, sections[section_name])]
+                continue
+
+            current_section = None
+            stack = []
+            continue
+
+        if not current_section or ":" not in stripped:
+            continue
+
+        key, value = stripped.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+
+        while len(stack) > 1 and indent <= stack[-1][0]:
+            stack.pop()
+
+        current = stack[-1][1]
+        if value == "":
+            current[key] = {}
+            stack.append((indent, current[key]))
+            continue
+
+        current[key] = parse_config_value(value)
+
+    return sections
+
+
+def load_config(config_file=CONFIG_FILE):
+    config = DEFAULT_CONFIG.copy()
+    loaded_sections = load_simple_yaml_sections(config_file, {"ops_alerts"})
+    config["ops_alerts"] = merge_dict(
+        config.get("ops_alerts", {}),
+        loaded_sections.get("ops_alerts", {}),
+    )
+    return config
 
 
 def normalize_evm_address(address):
@@ -190,6 +290,132 @@ def snapshots_file_path(current_time):
     return MARKET_RANKER_DATA_DIR / f"snapshots_{current_time.strftime('%Y-%m-%d')}.jsonl"
 
 
+def ops_alerts_enabled(config=None):
+    config = config or {}
+    ops_config = config.get("ops_alerts") or {}
+    if "enabled" in ops_config:
+        return bool(ops_config.get("enabled"))
+
+    return os.getenv("KRPTO_OPS_ALERTS_ENABLED", "true").lower() not in {"0", "false", "no"}
+
+
+def ops_alert_cooldown_seconds(config=None):
+    config = config or {}
+    ops_config = config.get("ops_alerts") or {}
+    if ops_config.get("cooldown_seconds") is not None:
+        try:
+            return int(ops_config.get("cooldown_seconds"))
+        except (TypeError, ValueError):
+            return OPS_ALERT_DEFAULT_COOLDOWN_SECONDS
+
+    try:
+        return int(os.getenv("KRPTO_OPS_ALERT_COOLDOWN_SECONDS", OPS_ALERT_DEFAULT_COOLDOWN_SECONDS))
+    except ValueError:
+        return OPS_ALERT_DEFAULT_COOLDOWN_SECONDS
+
+
+def classify_error(error_text):
+    if not error_text:
+        return None
+
+    text = str(error_text)
+    lower_text = text.lower()
+
+    if "429" in text or "too many requests" in lower_text:
+        return "dexscreener_rate_limit"
+    if "timeout" in lower_text or "timed out" in lower_text:
+        return "dexscreener_timeout"
+    if " 5" in text or "500" in text or "502" in text or "503" in text or "504" in text:
+        return "dexscreener_http_5xx"
+    if " client error" in lower_text or " 4" in text:
+        return "dexscreener_http_4xx"
+    if "json" in lower_text:
+        return "dexscreener_json_error"
+
+    return "unknown_error"
+
+
+def error_summary_from_results(results):
+    counts = Counter()
+    examples = {}
+
+    for item in results:
+        error_text = item.get("error")
+        error_type = classify_error(error_text)
+        if not error_type:
+            continue
+        counts[error_type] += 1
+        examples.setdefault(error_type, item.get("watchlist_key") or item.get("token_address"))
+
+    return counts, examples
+
+
+def should_send_ops_alert(alert_key, current_time, config=None):
+    state = load_json(OPS_ALERT_STATE_FILE, {})
+    if not isinstance(state, dict):
+        state = {}
+
+    cooldown_seconds = ops_alert_cooldown_seconds(config)
+    last_sent = parse_iso(state.get(alert_key, {}).get("last_sent_at_utc"))
+    if last_sent and (current_time - last_sent).total_seconds() < cooldown_seconds:
+        return False
+
+    state[alert_key] = {"last_sent_at_utc": to_iso(current_time)}
+    atomic_save_json(OPS_ALERT_STATE_FILE, state)
+    return True
+
+
+def build_ops_alert_message(summary, error_counts, examples):
+    lines = [
+        "<b>KRPTO-V | Alerta operacional</b>",
+        "<b>Modulo:</b> market_ranker",
+        f"<b>Ciclo:</b> {telegram_notifier.escape_html(summary.get('timestamp'))}",
+        f"<b>Tokens consultados:</b> {telegram_notifier.escape_html(summary.get('tokens_checked'))}",
+        f"<b>Erros:</b> {telegram_notifier.escape_html(summary.get('errors'))}",
+    ]
+
+    if error_counts.get("dexscreener_rate_limit"):
+        lines.append("<b>Atencao:</b> Dexscreener rate limit detectado.")
+
+    lines.append("<b>Erros por tipo:</b>")
+    for error_type, count in error_counts.most_common():
+        example = examples.get(error_type) or "indisponivel"
+        lines.append(
+            "- "
+            f"{telegram_notifier.escape_html(count)} | "
+            f"{telegram_notifier.escape_html(error_type)} | "
+            f"exemplo: <code>{telegram_notifier.escape_html(example)}</code>"
+        )
+
+    return "\n".join(lines)
+
+
+def maybe_send_ops_alert(summary, results, current_time, config=None):
+    if not ops_alerts_enabled(config):
+        return None
+
+    error_counts, examples = error_summary_from_results(results)
+    if not error_counts:
+        return None
+
+    alert_key = (
+        "market_ranker:dexscreener_rate_limit"
+        if error_counts.get("dexscreener_rate_limit")
+        else "market_ranker:external_errors"
+    )
+    if not should_send_ops_alert(alert_key, current_time, config):
+        return {"success": False, "error": "cooldown"}
+
+    message = build_ops_alert_message(summary, error_counts, examples)
+    result = telegram_notifier.send_message(
+        "system",
+        message,
+        config={"dry_run": False, "parse_mode": "HTML", "timeout_seconds": 20},
+        env=telegram_notifier.load_telegram_env(PROJECT_ROOT / ".env"),
+    )
+    return result
+
+
 def normalize_watchlist_entry(key, entry):
     if not isinstance(entry, dict):
         return None
@@ -234,6 +460,92 @@ def fetch_token_pairs(chain, token_address, session=requests):
     response.raise_for_status()
     payload = response.json()
     return payload if isinstance(payload, list) else []
+
+
+def fetch_token_pairs_batch(chain, token_addresses, session=requests):
+    normalized_addresses = [
+        normalize_evm_address(token_address)
+        for token_address in token_addresses
+    ]
+    normalized_addresses = [address for address in normalized_addresses if address]
+    if not normalized_addresses:
+        return []
+
+    url = DEXSCREENER_TOKENS_URL.format(
+        chain=chain,
+        token_addresses=",".join(normalized_addresses),
+    )
+    response = session.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    payload = response.json()
+    return payload if isinstance(payload, list) else []
+
+
+def batched(items, batch_size):
+    for index in range(0, len(items), batch_size):
+        yield items[index:index + batch_size]
+
+
+def pair_token_addresses(pair):
+    addresses = set()
+    if not isinstance(pair, dict):
+        return addresses
+
+    for key in ("baseToken", "quoteToken"):
+        token = pair.get(key)
+        if not isinstance(token, dict):
+            continue
+        address = normalize_evm_address(token.get("address"))
+        if address:
+            addresses.add(address)
+
+    return addresses
+
+
+def map_pairs_to_tokens(tokens, pairs):
+    wanted = {token["token_address"] for token in tokens}
+    mapped = {token["watchlist_key"]: [] for token in tokens}
+
+    for pair in pairs:
+        for address in pair_token_addresses(pair):
+            if address not in wanted:
+                continue
+            for token in tokens:
+                if token["token_address"] == address:
+                    mapped[token["watchlist_key"]].append(pair)
+
+    return mapped
+
+
+def fetch_pairs_for_rankable_tokens(tokens, session=requests):
+    pairs_by_key = {token["watchlist_key"]: [] for token in tokens}
+    errors_by_key = {}
+    batch_calls = 0
+    tokens_by_chain = {}
+
+    for token in tokens:
+        tokens_by_chain.setdefault(token["chain"], []).append(token)
+
+    for chain, chain_tokens in tokens_by_chain.items():
+        for batch in batched(chain_tokens, DEXSCREENER_MAX_BATCH_TOKENS):
+            batch_calls += 1
+            try:
+                pairs = fetch_token_pairs_batch(
+                    chain,
+                    [token["token_address"] for token in batch],
+                    session=session,
+                )
+            except Exception as error:
+                error_text = str(error)
+                for token in batch:
+                    errors_by_key[token["watchlist_key"]] = error_text
+                continue
+
+            batch_pairs_by_key = map_pairs_to_tokens(batch, pairs)
+            for watchlist_key, token_pairs in batch_pairs_by_key.items():
+                pairs_by_key[watchlist_key].extend(token_pairs)
+
+    return pairs_by_key, errors_by_key, batch_calls
 
 
 def nested_number(data, path, default=0):
@@ -541,9 +853,21 @@ def print_summary(summary, results):
     print(f"Dry-run: {str(summary['dry_run']).lower()}")
     print(f"Tokens lidos da WL: {summary['watchlist_total']}")
     print(f"Tokens consultados: {summary['tokens_checked']}")
+    print(f"Chamadas Dexscreener em lote: {summary.get('dex_batch_calls', 0)}")
     print(f"Encontrados na Dexscreener: {summary['dex_found']}")
     print(f"Nao encontrados: {summary['dex_not_found']}")
     print(f"Erros: {summary['errors']}")
+    if "ops_alert_sent" in summary:
+        print(f"Alerta operacional enviado: {str(summary['ops_alert_sent']).lower()}")
+        if summary.get("ops_alert_message_id") is not None:
+            print(f"Telegram message_id operacional: {summary['ops_alert_message_id']}")
+        if summary.get("ops_alert_error"):
+            print(f"Alerta operacional erro: {summary['ops_alert_error']}")
+    error_counts, examples = error_summary_from_results(results)
+    if error_counts:
+        print("Erros por tipo:")
+        for error_type, count in error_counts.most_common():
+            print(f"- {count} | {error_type} | exemplo: {examples.get(error_type)}")
 
     top = sorted(
         [item for item in results if item.get("market_score") is not None],
@@ -580,6 +904,7 @@ def print_summary(summary, results):
 
 def run_cycle(dry_run=False, session=requests):
     ensure_directories()
+    config = load_config()
     current_time = utc_now()
     now_text = to_iso(current_time)
     watchlist = load_watchlist()
@@ -591,6 +916,10 @@ def run_cycle(dry_run=False, session=requests):
     dex_found = 0
     dex_not_found = 0
     errors = 0
+    pairs_by_key, errors_by_key, dex_batch_calls = fetch_pairs_for_rankable_tokens(
+        rankable_tokens,
+        session=session,
+    )
 
     for token in rankable_tokens:
         dex_status = "not_found"
@@ -610,7 +939,10 @@ def run_cycle(dry_run=False, session=requests):
         error_text = None
 
         try:
-            pairs = fetch_token_pairs(token["chain"], token["token_address"], session=session)
+            if errors_by_key.get(token["watchlist_key"]):
+                raise RuntimeError(errors_by_key[token["watchlist_key"]])
+
+            pairs = pairs_by_key.get(token["watchlist_key"], [])
             selected_pair, association_type = select_best_pair(pairs, token["entry"])
             social_eligibility = calculate_social_eligibility(
                 pairs,
@@ -680,7 +1012,15 @@ def run_cycle(dry_run=False, session=requests):
         "dex_found": dex_found,
         "dex_not_found": dex_not_found,
         "errors": errors,
+        "dex_batch_calls": dex_batch_calls,
     }
+    ops_alert_result = maybe_send_ops_alert(summary, results, current_time, config=config)
+    if ops_alert_result and ops_alert_result.get("success"):
+        summary["ops_alert_sent"] = True
+        summary["ops_alert_message_id"] = ops_alert_result.get("message_id")
+    elif ops_alert_result:
+        summary["ops_alert_sent"] = False
+        summary["ops_alert_error"] = ops_alert_result.get("error")
     print_summary(summary, results)
     return summary
 

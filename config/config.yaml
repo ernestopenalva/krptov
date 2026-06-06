@@ -54,3 +54,7 @@ telegram_alerts:
   dry_run: false
   parse_mode: "HTML"
   timeout_seconds: 20
+
+ops_alerts:
+  enabled: true
+  cooldown_seconds: 1800

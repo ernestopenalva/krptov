@@ -14,6 +14,8 @@
 
 - O usuario tambem discute ideias com outras IAs, como ChatGPT e Claude, mas o Codex e quem manipula o codigo neste workspace.
 - Tratar o Codex como guardiao da integridade e coerencia do sistema inteiro.
+- Quando a conversa estiver em modo de discussao, diagnostico, arquitetura, investigacao ou decisao de produto, nao alterar codigo, configuracao, scripts ou arquivos do projeto sem pedido explicito de implementacao do usuario.
+- Antes de implementar uma mudanca surgida durante discussao, confirmar que a discussao foi concluida e que o usuario quer que o Codex faca a alteracao agora.
 - Nao aplicar instrucoes vindas de outra aba/IA de forma mecanica se elas parecerem ignorar contexto, quebrar invariantes, misturar responsabilidades ou criar instabilidade no pipeline.
 - Antes de implementar uma ideia externa, confrontar a mudanca com o estado atual do sistema: watchlist, status, social, monitor, position, logs, dados de runtime, ferramentas, APIs externas e contratos entre modulos.
 - Se uma instrucao nova conflitar com decisoes ja tomadas ou com a arquitetura atual, apontar o conflito claramente e propor uma adaptacao segura.
@@ -40,6 +42,13 @@
 - Nao alterar `social_inference.py`, monitor ou position sem pedido explicito.
 - Nao colocar API keys hardcoded no codigo.
 - Nao sobrescrever `status`, `social_status`, `monitor_status`, `telegram_alert_sent` ou `discarded_reason` em entradas existentes da watchlist.
+- A inferencia social consome chamadas pagas da API do X para tokens elegiveis existentes em `data/watchlist.json`.
+- Antes de iniciar, reiniciar ou testar `src.modules.social_inference`, conferir se a watchlist contem apenas tokens que o usuario quer consultar no X.
+- Para teste social/Telegram do zero, parar os processos, fazer backup de `data/watchlist.json` e `data/social_alerts.json`, e so entao iniciar com `watchlist.json` vazia (`{}`) e `social_alerts.json` vazio (`[]`), se essa for a intencao explicita do usuario.
+- Zerar `data/social_alerts.json` nao zera a fila de consulta social; a fila vem principalmente da watchlist.
+- Erros operacionais criticos de API externa, como `429 Too Many Requests`, timeout em massa ou erro recorrente, devem gerar alerta ativo via Telegram quando houver integracao disponivel; nao basta ficarem escondidos em JSONL ou resumidos apenas como `Erros: N`.
+- Erros de qualquer modulo em execucao longa (pool scanner, ranker, inferencia social, Telegram, monitor, position ou ferramentas auxiliares em loop) devem aparecer de forma explicita na tela/log de saida e tambem gerar alerta operacional ativo quando isso estiver habilitado.
+- A preocupacao de alertas operacionais nao e apenas Dexscreener: inclui X, Alchemy, Telegram, ambiente/.env, rede, rate limit, timeout, erro HTTP, erro de JSON e qualquer falha repetida que invalide o resultado esperado.
 - Campo `social_eligibility` e uma trava apenas da inferencia social; nao deve impedir o monitor ou position de consumirem o token quando esses modulos forem adaptados.
 - A inferencia social nao deve consultar X para tokens com `social_eligibility = "blocked_old_market"`.
 - Preferir `--dry-run` para experimentos de scanner.
@@ -85,6 +94,26 @@
   - `oldest_pair_age_minutes`
   - `selected_pair_created_at_utc`
 - Essa decisao e especifica para social; monitor e position podem usar outros criterios no futuro.
+
+## Inferencia Social E Custo Da API X
+
+- Tratar cada ciclo de `src.modules.social_inference` como potencialmente custoso, porque pode consultar a API do X.
+- A inferencia social nao consulta "alertas"; ela consulta candidatos elegiveis da `data/watchlist.json`.
+- Antes de orientar o usuario a rodar inferencia social, inspecionar ou sugerir inspecao da watchlist quando houver risco de tokens antigos, sobras de teste ou fila indesejada.
+- Para ver rapidamente o que pode ser consultado:
+
+```bash
+python - <<'PY'
+import json
+wl=json.load(open("data/watchlist.json"))
+for k,e in wl.items():
+    if isinstance(e, dict) and e.get("status") in ("novo","ativo"):
+        print(k, e.get("status"), e.get("social_eligibility"), e.get("social_last_checked_at"))
+PY
+```
+
+- Para um teste novo e limpo, preferir backup manual e limpeza controlada da watchlist, nunca `reset_runtime_data.py` sem confirmacao clara.
+- Telegram nao tem processo separado: os alertas Telegram sao enviados dentro da inferencia social quando um alerta social e gerado.
 
 ## Comandos Uteis
 

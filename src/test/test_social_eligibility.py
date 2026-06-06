@@ -1,9 +1,33 @@
 import json
+import sys
 import tempfile
+import types
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+
+requests = sys.modules.get("requests")
+if requests is None:
+    requests = types.ModuleType("requests")
+    sys.modules["requests"] = requests
+
+if not hasattr(requests, "RequestException"):
+    class RequestException(Exception):
+        pass
+
+    requests.RequestException = RequestException
+
+if not hasattr(requests, "HTTPError"):
+    class HTTPError(requests.RequestException):
+        pass
+
+    requests.HTTPError = HTTPError
+
+if "dotenv" not in sys.modules:
+    dotenv = types.ModuleType("dotenv")
+    dotenv.load_dotenv = lambda *args, **kwargs: None
+    sys.modules["dotenv"] = dotenv
 
 from src.modules import market_ranker, social_inference
 
@@ -22,8 +46,10 @@ class FakeResponse:
 class FakeDexscreenerSession:
     def __init__(self, pairs):
         self.pairs = pairs
+        self.urls = []
 
     def get(self, url, timeout):
+        self.urls.append(url)
         return FakeResponse(self.pairs)
 
 
@@ -64,6 +90,8 @@ class SocialEligibilityTests(unittest.TestCase):
                     "chainId": "ethereum",
                     "dexId": "uniswap",
                     "pairAddress": "0x3333333333333333333333333333333333333333",
+                    "baseToken": {"address": token_address, "symbol": "TEST"},
+                    "quoteToken": {"address": "0x0000000000000000000000000000000000000000", "symbol": "ETH"},
                     "pairCreatedAt": old_pair_created_at,
                     "liquidity": {"usd": 100},
                     "volume": {"h24": 0},
@@ -73,6 +101,8 @@ class SocialEligibilityTests(unittest.TestCase):
                     "chainId": "ethereum",
                     "dexId": "uniswap",
                     "pairAddress": pool_address,
+                    "baseToken": {"address": token_address, "symbol": "TEST"},
+                    "quoteToken": {"address": "0x0000000000000000000000000000000000000000", "symbol": "ETH"},
                     "pairCreatedAt": fresh_pair_created_at,
                     "liquidity": {"usd": 5000},
                     "volume": {"h24": 1000},

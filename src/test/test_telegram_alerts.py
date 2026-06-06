@@ -147,6 +147,63 @@ class TelegramNotifierTests(unittest.TestCase):
         self.assertEqual(result["message_id"], 456)
         self.assertEqual(session.calls[0]["json"]["parse_mode"], "HTML")
 
+    def test_trading_channel_uses_trading_destination(self):
+        session = FakeTelegramSession(FakeTelegramResponse({"ok": True, "result": {"message_id": 456}}))
+
+        result = telegram_notifier.send_message(
+            "trading",
+            "teste",
+            config=telegram_config(),
+            env={
+                "bot_token": "token",
+                "trading_chat_id": "trading-chat",
+                "trading_thread_id": "10",
+                "system_chat_id": "system-chat",
+                "system_thread_id": "20",
+            },
+            session=session,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(session.calls[0]["json"]["chat_id"], "trading-chat")
+        self.assertEqual(session.calls[0]["json"]["message_thread_id"], "10")
+
+    def test_system_channel_uses_system_destination(self):
+        session = FakeTelegramSession(FakeTelegramResponse({"ok": True, "result": {"message_id": 456}}))
+
+        result = telegram_notifier.send_message(
+            "system",
+            "teste",
+            config=telegram_config(),
+            env={
+                "bot_token": "token",
+                "trading_chat_id": "trading-chat",
+                "trading_thread_id": "10",
+                "system_chat_id": "system-chat",
+                "system_thread_id": "20",
+            },
+            session=session,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(session.calls[0]["json"]["chat_id"], "system-chat")
+        self.assertEqual(session.calls[0]["json"]["message_thread_id"], "20")
+
+    def test_legacy_chat_id_still_works(self):
+        session = FakeTelegramSession(FakeTelegramResponse({"ok": True, "result": {"message_id": 456}}))
+
+        result = telegram_notifier.send_message(
+            "system",
+            "teste",
+            config=telegram_config(),
+            env={"bot_token": "token", "chat_id": "legacy-chat", "thread_id": "30"},
+            session=session,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(session.calls[0]["json"]["chat_id"], "legacy-chat")
+        self.assertEqual(session.calls[0]["json"]["message_thread_id"], "30")
+
     def test_api_failure_returns_error(self):
         session = FakeTelegramSession(FakeTelegramResponse({"ok": False, "description": "chat not found"}))
 

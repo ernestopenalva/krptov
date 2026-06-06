@@ -7,6 +7,9 @@ from dotenv import load_dotenv
 
 
 TELEGRAM_SEND_MESSAGE_URL = "https://api.telegram.org/bot{bot_token}/sendMessage"
+CHANNEL_TRADING = "trading"
+CHANNEL_SYSTEM = "system"
+SUPPORTED_CHANNELS = {CHANNEL_TRADING, CHANNEL_SYSTEM}
 
 
 def escape_html(value):
@@ -26,7 +29,24 @@ def load_telegram_env(env_file=None):
         "bot_token": os.getenv("TELEGRAM_BOT_TOKEN"),
         "chat_id": os.getenv("TELEGRAM_CHAT_ID"),
         "thread_id": os.getenv("TELEGRAM_THREAD_ID"),
+        "trading_chat_id": os.getenv("TELEGRAM_TRADING_CHAT_ID"),
+        "trading_thread_id": os.getenv("TELEGRAM_TRADING_THREAD_ID"),
+        "system_chat_id": os.getenv("TELEGRAM_SYSTEM_CHAT_ID"),
+        "system_thread_id": os.getenv("TELEGRAM_SYSTEM_THREAD_ID"),
     }
+
+
+def normalize_channel(channel):
+    if channel in SUPPORTED_CHANNELS:
+        return channel
+    return CHANNEL_TRADING
+
+
+def channel_destination(env, channel):
+    channel = normalize_channel(channel)
+    chat_id = env.get(f"{channel}_chat_id") or env.get("chat_id")
+    thread_id = env.get(f"{channel}_thread_id") or env.get("thread_id")
+    return chat_id, thread_id
 
 
 def short_address(value):
@@ -107,19 +127,25 @@ def build_alert_message(alert, entry=None):
 
 
 def send_message(
-    text,
+    channel_or_text,
+    text=None,
     config=None,
     env=None,
     session=requests,
 ):
+    if text is None:
+        channel = CHANNEL_TRADING
+        text = channel_or_text
+    else:
+        channel = normalize_channel(channel_or_text)
+
     config = config or {}
     env = env or load_telegram_env()
     dry_run = bool(config.get("dry_run", False))
     parse_mode = config.get("parse_mode") or "HTML"
     timeout_seconds = int(config.get("timeout_seconds") or 20)
     bot_token = env.get("bot_token")
-    chat_id = env.get("chat_id")
-    thread_id = env.get("thread_id")
+    chat_id, thread_id = channel_destination(env, channel)
 
     if dry_run:
         return {
@@ -133,7 +159,11 @@ def send_message(
     if not bot_token:
         return {"success": False, "message_id": None, "error": "TELEGRAM_BOT_TOKEN ausente"}
     if not chat_id:
-        return {"success": False, "message_id": None, "error": "TELEGRAM_CHAT_ID ausente"}
+        return {
+            "success": False,
+            "message_id": None,
+            "error": f"TELEGRAM_{channel.upper()}_CHAT_ID ausente",
+        }
 
     payload = {
         "chat_id": chat_id,
@@ -180,6 +210,6 @@ def send_message(
     }
 
 
-def send_alert(alert, entry=None, config=None, env=None, session=requests):
+def send_alert(alert, entry=None, config=None, env=None, session=requests, channel=CHANNEL_TRADING):
     message = build_alert_message(alert, entry=entry)
-    return send_message(message, config=config, env=env, session=session)
+    return send_message(channel, message, config=config, env=env, session=session)
