@@ -1,0 +1,82 @@
+import argparse
+import unittest
+
+from src.tools import watchlist_ranking
+
+
+def args(**updates):
+    defaults = {
+        "chain": None,
+        "source": None,
+        "eligible_only": False,
+        "top": 30,
+    }
+    defaults.update(updates)
+    return argparse.Namespace(**defaults)
+
+
+class WatchlistRankingTests(unittest.TestCase):
+    def test_ranking_prioritizes_social_ready_then_score(self):
+        watchlist = {
+            "ethereum:0x1111111111111111111111111111111111111111": {
+                "chain": "ethereum",
+                "token_address": "0x1111111111111111111111111111111111111111",
+                "status": "novo",
+                "social_eligibility": "eligible",
+                "market_score": 10,
+            },
+            "base:0x2222222222222222222222222222222222222222": {
+                "chain": "base",
+                "token_address": "0x2222222222222222222222222222222222222222",
+                "status": "novo",
+                "social_eligibility": "eligible",
+                "market_score": 90,
+            },
+            "ethereum:0x3333333333333333333333333333333333333333": {
+                "chain": "ethereum",
+                "token_address": "0x3333333333333333333333333333333333333333",
+                "status": "novo",
+                "social_eligibility": "pending",
+                "market_score": 100,
+            },
+        }
+
+        ranked = watchlist_ranking.ranked_entries(watchlist, args())
+
+        self.assertEqual(ranked[0]["chain"], "base")
+        self.assertEqual(ranked[0]["market_score"], 90)
+        self.assertEqual(ranked[1]["market_score"], 10)
+        self.assertEqual(ranked[2]["social_eligibility"], "pending")
+
+    def test_eligible_only_filters_social_candidates(self):
+        watchlist = {
+            "ethereum:0x1111111111111111111111111111111111111111": {
+                "chain": "ethereum",
+                "token_address": "0x1111111111111111111111111111111111111111",
+                "status": "novo",
+                "social_eligibility": "eligible",
+                "market_score": 10,
+            },
+            "ethereum:0x2222222222222222222222222222222222222222": {
+                "chain": "ethereum",
+                "token_address": "0x2222222222222222222222222222222222222222",
+                "status": "novo",
+                "social_eligibility": "eligible",
+            },
+        }
+
+        ranked = watchlist_ranking.ranked_entries(watchlist, args(eligible_only=True))
+
+        self.assertEqual(len(ranked), 1)
+        self.assertEqual(ranked[0]["market_score"], 10)
+
+    def test_movement_marker_reports_position_change(self):
+        previous = {"a": 3, "b": 1}
+
+        self.assertEqual(watchlist_ranking.movement_marker("a", 1, previous), "up 2")
+        self.assertEqual(watchlist_ranking.movement_marker("b", 2, previous), "down 1")
+        self.assertEqual(watchlist_ranking.movement_marker("c", 4, previous), "new")
+
+
+if __name__ == "__main__":
+    unittest.main()
