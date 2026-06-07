@@ -841,6 +841,25 @@ def pair_summary(pair):
     }
 
 
+def token_identity_from_pair(pair, token_address):
+    if not isinstance(pair, dict):
+        return {}
+
+    normalized_token = normalize_evm_address(token_address)
+    for side in ("baseToken", "quoteToken"):
+        token = pair.get(side)
+        if not isinstance(token, dict):
+            continue
+        if normalize_evm_address(token.get("address")) != normalized_token:
+            continue
+        return {
+            "token_name": token.get("name"),
+            "token_symbol": token.get("symbol"),
+        }
+
+    return {}
+
+
 def build_snapshot(
     token,
     dex_status,
@@ -1210,6 +1229,11 @@ def run_cycle(dry_run=False, session=requests):
             }
             if market_score is not None:
                 updates_by_key[token["watchlist_key"]]["market_score"] = market_score
+                updates_by_key[token["watchlist_key"]].update(metrics or {})
+                identity = token_identity_from_pair(selected_pair, token["token_address"])
+                for field, value in identity.items():
+                    if value:
+                        updates_by_key[token["watchlist_key"]][field] = value
         except Exception as error:
             dex_status = "error"
             error_text = str(error)

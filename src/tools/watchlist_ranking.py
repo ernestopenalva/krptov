@@ -60,6 +60,40 @@ def format_age(minutes):
     return f"{number / 60:.1f}h"
 
 
+def format_money(value):
+    number = numeric_or_none(value)
+    if number is None:
+        return "-"
+    if number >= 1_000_000:
+        return f"${number / 1_000_000:.1f}M"
+    if number >= 1_000:
+        return f"${number / 1_000:.1f}K"
+    return f"${number:.0f}"
+
+
+def format_compact_number(value):
+    number = numeric_or_none(value)
+    if number is None:
+        return "-"
+    if number >= 1_000_000:
+        return f"{number / 1_000_000:.1f}M"
+    if number >= 1_000:
+        return f"{number / 1_000:.1f}K"
+    return f"{number:.0f}"
+
+
+def display_name(entry):
+    symbol = entry.get("token_symbol")
+    name = entry.get("token_name")
+    if symbol and name:
+        return f"{symbol}/{name}"
+    if symbol:
+        return str(symbol)
+    if name:
+        return str(name)
+    return short_address(entry["token_address"])
+
+
 def normalize_entry(key, entry):
     if not isinstance(entry, dict):
         return None
@@ -72,10 +106,15 @@ def normalize_entry(key, entry):
         "status": entry.get("status") or "-",
         "social_eligibility": entry.get("social_eligibility") or "missing",
         "market_score": numeric_or_none(entry.get("market_score")),
+        "liquidity_usd": numeric_or_none(entry.get("liquidity_usd")),
+        "volume_h24": numeric_or_none(entry.get("volume_h24")),
+        "txns_h24": numeric_or_none(entry.get("txns_h24")),
         "oldest_pair_age_minutes": numeric_or_none(entry.get("oldest_pair_age_minutes")),
         "times_seen": int(entry.get("times_seen") or 0),
         "last_seen_at_utc": entry.get("last_seen_at_utc") or entry.get("created_at_utc") or "",
         "token_address": entry.get("token_address") or key.split(":", 1)[-1],
+        "token_name": entry.get("token_name"),
+        "token_symbol": entry.get("token_symbol"),
     }
 
 
@@ -148,8 +187,11 @@ def table_rows(entries, previous_positions, top):
                 "quote": entry["quote_token"],
                 "elig": entry["social_eligibility"],
                 "age": format_age(entry["oldest_pair_age_minutes"]),
+                "liq": format_money(entry["liquidity_usd"]),
+                "vol": format_money(entry["volume_h24"]),
+                "txns": format_compact_number(entry["txns_h24"]),
                 "seen": str(entry["times_seen"]),
-                "token": short_address(entry["token_address"]),
+                "name": display_name(entry),
             }
         )
 
@@ -166,8 +208,11 @@ def print_table(rows):
         ("quote", "Quote", 7),
         ("elig", "Elig", 18),
         ("age", "AgeDS", 7),
+        ("liq", "Liq", 8),
+        ("vol", "Vol24h", 8),
+        ("txns", "Tx24h", 7),
         ("seen", "Seen", 5),
-        ("token", "Token", 15),
+        ("name", "Nome", 22),
     ]
     header = " ".join(title.ljust(width) for _, title, width in columns)
     print(header)
@@ -222,7 +267,7 @@ def parse_args():
         description="Mostra o ranking atual da Watchlist do KRPTO-V.",
     )
     parser.add_argument("--watchlist", type=Path, default=WATCHLIST_FILE)
-    parser.add_argument("--top", type=int, default=30)
+    parser.add_argument("--top", type=int, default=20)
     parser.add_argument("--chain", choices=["ethereum", "base"])
     parser.add_argument("--source")
     parser.add_argument("--eligible-only", action="store_true")

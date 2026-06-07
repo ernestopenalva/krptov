@@ -71,7 +71,7 @@ def pair_for(token_address, pair_address, liquidity=5000):
         "chainId": "ethereum",
         "dexId": "uniswap",
         "pairAddress": pair_address,
-        "baseToken": {"address": token_address, "symbol": "TEST"},
+        "baseToken": {"address": token_address, "symbol": "TEST", "name": "Test Token"},
         "quoteToken": {"address": "0x0000000000000000000000000000000000000000", "symbol": "ETH"},
         "pairCreatedAt": int(datetime(2026, 6, 6, 11, 56, 0, tzinfo=timezone.utc).timestamp() * 1000),
         "liquidity": {"usd": liquidity},
@@ -127,6 +127,12 @@ class MarketRankerBatchTests(unittest.TestCase):
             self.assertEqual(len(session.urls), 1)
             self.assertIn("/tokens/v1/ethereum/", session.urls[0])
             self.assertIn(f"{token_a},{token_b}", session.urls[0])
+            updated = json.loads(watchlist_file.read_text(encoding="utf-8"))
+            self.assertEqual(updated[key_a]["token_symbol"], "TEST")
+            self.assertEqual(updated[key_a]["token_name"], "Test Token")
+            self.assertEqual(updated[key_a]["liquidity_usd"], 5000)
+            self.assertEqual(updated[key_a]["volume_h24"], 1000)
+            self.assertEqual(updated[key_a]["txns_h24"], 20)
 
     def test_watchlist_retention_applies_blind_cap_without_removing_protected(self):
         current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
