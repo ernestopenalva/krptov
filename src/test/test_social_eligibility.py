@@ -187,6 +187,90 @@ class SocialEligibilityTests(unittest.TestCase):
             self.assertEqual(entry["social_skip_reason"], "social_eligibility_blocked_old_market")
             self.assertIn("social_last_skipped_at", entry)
 
+    def test_social_inference_requires_eligible_and_numeric_market_score(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            watchlist_file = root / "watchlist.json"
+            lock_file = root / "watchlist.lock"
+            latest_file = root / "social_inference_latest.json"
+            alerts_file = root / "social_alerts.json"
+            posts_dir = root / "social_posts"
+            alert_posts_dir = root / "social_alert_posts"
+            logs_dir = root / "logs"
+            missing_token = "0x1111111111111111111111111111111111111111"
+            pending_token = "0x2222222222222222222222222222222222222222"
+            no_score_token = "0x3333333333333333333333333333333333333333"
+            watchlist_file.write_text(
+                json.dumps(
+                    {
+                        f"ethereum:{missing_token}": {
+                            "watchlist_key": f"ethereum:{missing_token}",
+                            "chain": "ethereum",
+                            "chain_id": "ethereum",
+                            "token_address": missing_token,
+                            "status": "novo",
+                            "social_status": "pendente",
+                            "monitor_status": "pendente",
+                        },
+                        f"ethereum:{pending_token}": {
+                            "watchlist_key": f"ethereum:{pending_token}",
+                            "chain": "ethereum",
+                            "chain_id": "ethereum",
+                            "token_address": pending_token,
+                            "status": "novo",
+                            "social_status": "pendente",
+                            "monitor_status": "pendente",
+                            "social_eligibility": "pending",
+                        },
+                        f"ethereum:{no_score_token}": {
+                            "watchlist_key": f"ethereum:{no_score_token}",
+                            "chain": "ethereum",
+                            "chain_id": "ethereum",
+                            "token_address": no_score_token,
+                            "status": "novo",
+                            "social_status": "pendente",
+                            "monitor_status": "pendente",
+                            "social_eligibility": "eligible",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(social_inference, "DATA_DIR", root), patch.object(
+                social_inference, "LOGS_DIR", logs_dir
+            ), patch.object(social_inference, "WATCHLIST_FILE", watchlist_file), patch.object(
+                social_inference, "WATCHLIST_LOCK_FILE", lock_file
+            ), patch.object(social_inference, "LATEST_SNAPSHOT_FILE", latest_file), patch.object(
+                social_inference, "ALERTS_FILE", alerts_file
+            ), patch.object(social_inference, "POSTS_DIR", posts_dir), patch.object(
+                social_inference, "ALERT_POSTS_DIR", alert_posts_dir
+            ), patch.object(
+                social_inference, "load_bearer_token", return_value="fake-token"
+            ), patch.object(
+                social_inference,
+                "search_token_mentions",
+                side_effect=AssertionError("X should not be queried"),
+            ):
+                snapshot = social_inference.run_cycle()
+
+            self.assertEqual(snapshot["tokens_checked"], 0)
+            self.assertEqual(snapshot["tokens_blocked_by_social_eligibility"], 2)
+            self.assertEqual(snapshot["tokens_blocked_by_market_score"], 1)
+            updated = json.loads(watchlist_file.read_text(encoding="utf-8"))
+            self.assertEqual(
+                updated[f"ethereum:{missing_token}"]["social_skip_reason"],
+                "social_eligibility_not_eligible",
+            )
+            self.assertEqual(
+                updated[f"ethereum:{pending_token}"]["social_skip_reason"],
+                "social_eligibility_not_eligible",
+            )
+            self.assertEqual(
+                updated[f"ethereum:{no_score_token}"]["social_skip_reason"],
+                "missing_numeric_market_score",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

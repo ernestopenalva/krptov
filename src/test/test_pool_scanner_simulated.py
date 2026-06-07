@@ -36,6 +36,9 @@ HOOKS = "0x4444444444444444444444444444444444444444"
 POOL_MANAGER = "0x000000000004444c5dc75cb358380d2e3de08a90"
 POOL_ID = "0x" + ("ab" * 32)
 TX_HASH = "0x" + ("cd" * 32)
+BASE_WETH = "0x4200000000000000000000000000000000000006"
+AERODROME_FACTORY = "0x420dd381b31aef6683db6b902084cb0ffece40da"
+AERODROME_SLIPSTREAM_FACTORY = "0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a"
 
 
 def topic_address(address):
@@ -81,6 +84,34 @@ def make_v4_source():
         "factory_address": None,
         "pool_manager_address": POOL_MANAGER,
         "subscription_address": POOL_MANAGER,
+    }
+
+
+def make_aerodrome_log(token0, token1, stable=False):
+    return {
+        "topics": [
+            pool_scanner.AERODROME_POOL_CREATED_TOPIC,
+            topic_address(token0),
+            topic_address(token1),
+            uint_word(1 if stable else 0),
+        ],
+        "data": "0x" + uint_word(int(POOL, 16)) + uint_word(42),
+        "blockNumber": "0x123",
+        "transactionHash": TX_HASH,
+    }
+
+
+def make_aerodrome_slipstream_log(token0, token1, tick_spacing=200):
+    return {
+        "topics": [
+            pool_scanner.AERODROME_SLIPSTREAM_POOL_CREATED_TOPIC,
+            topic_address(token0),
+            topic_address(token1),
+            int_word(tick_spacing),
+        ],
+        "data": "0x" + uint_word(int(POOL, 16)),
+        "blockNumber": "0x123",
+        "transactionHash": TX_HASH,
     }
 
 
@@ -251,6 +282,93 @@ class PoolScannerSimulatedTests(unittest.TestCase):
 
         self.assertEqual(v2, {"token0": TOKEN_A, "token1": WETH, "pool_address": POOL, "fee": None})
         self.assertEqual(v3, {"token0": TOKEN_A, "token1": WETH, "pool_address": POOL, "fee": 3000})
+
+    def test_aerodrome_pool_created_decoder_identifies_base_weth_pair(self):
+        decoded = pool_scanner.decode_aerodrome_pool_created(
+            make_aerodrome_log(BASE_WETH, TOKEN_A, stable=True)
+        )
+        candidate, ignored_reason = pool_scanner.identify_new_token(
+            decoded,
+            {BASE_WETH: "WETH"},
+        )
+
+        self.assertIsNone(ignored_reason)
+        self.assertEqual(decoded["token0"], BASE_WETH)
+        self.assertEqual(decoded["token1"], TOKEN_A)
+        self.assertTrue(decoded["stable"])
+        self.assertEqual(decoded["pool_address"], POOL)
+        self.assertEqual(decoded["pool_index"], 42)
+        self.assertEqual(candidate["token_address"], TOKEN_A)
+        self.assertEqual(candidate["quote_token"], "WETH")
+
+    def test_aerodrome_slipstream_decoder_identifies_base_weth_pair(self):
+        decoded = pool_scanner.decode_aerodrome_slipstream_pool_created(
+            make_aerodrome_slipstream_log(TOKEN_A, BASE_WETH, tick_spacing=200)
+        )
+        candidate, ignored_reason = pool_scanner.identify_new_token(
+            decoded,
+            {BASE_WETH: "WETH"},
+        )
+
+        self.assertIsNone(ignored_reason)
+        self.assertEqual(decoded["token0"], TOKEN_A)
+        self.assertEqual(decoded["token1"], BASE_WETH)
+        self.assertEqual(decoded["tick_spacing"], 200)
+        self.assertEqual(decoded["pool_address"], POOL)
+        self.assertEqual(candidate["token_address"], TOKEN_A)
+
+    def test_base_config_builds_aerodrome_and_uniswap_sources(self):
+        previous_rpc_url = os.environ.get("TEST_BASE_WSS_URL")
+        os.environ["TEST_BASE_WSS_URL"] = "wss://base.example.invalid"
+        try:
+            chains = pool_scanner.build_enabled_chains(
+                {
+                    "chains": {
+                        "base": {
+                            "enabled": True,
+                            "rpc_env": "TEST_BASE_WSS_URL",
+                            "quote_tokens": {"WETH": BASE_WETH},
+                            "sources": [
+                                {
+                                    "name": "aerodrome",
+                                    "enabled": True,
+                                    "type": "aerodrome_pool_factory",
+                                    "factory_address": AERODROME_FACTORY,
+                                    "event": "PoolCreated",
+                                },
+                                {
+                                    "name": "aerodrome_slipstream",
+                                    "enabled": True,
+                                    "type": "aerodrome_slipstream_factory",
+                                    "factory_address": AERODROME_SLIPSTREAM_FACTORY,
+                                    "event": "PoolCreated",
+                                },
+                                {
+                                    "name": "uniswap_v4",
+                                    "enabled": True,
+                                    "type": "uniswap_v4_pool_manager",
+                                    "pool_manager_address": POOL_MANAGER,
+                                    "event": "Initialize",
+                                },
+                            ],
+                        }
+                    }
+                }
+            )
+        finally:
+            if previous_rpc_url is None:
+                os.environ.pop("TEST_BASE_WSS_URL", None)
+            else:
+                os.environ["TEST_BASE_WSS_URL"] = previous_rpc_url
+
+        sources = {source["name"]: source for source in chains[0]["sources"]}
+        self.assertEqual(chains[0]["name"], "base")
+        self.assertEqual(sources["aerodrome"]["topic"], pool_scanner.AERODROME_POOL_CREATED_TOPIC)
+        self.assertEqual(
+            sources["aerodrome_slipstream"]["topic"],
+            pool_scanner.AERODROME_SLIPSTREAM_POOL_CREATED_TOPIC,
+        )
+        self.assertEqual(sources["uniswap_v4"]["topic"], pool_scanner.INITIALIZE_TOPIC)
 
 
 if __name__ == "__main__":

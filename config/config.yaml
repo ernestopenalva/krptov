@@ -16,6 +16,8 @@ social_inference:
   enabled: true
   scoring_mode: "origin_reputation"
   disable_post_metric_alerts: true
+  require_social_eligibility: "eligible"
+  require_numeric_market_score: true
   monitoring_window_hours: 22
   max_posts_per_token: 8
   cycle_interval_seconds: 180
@@ -58,3 +60,21 @@ telegram_alerts:
 ops_alerts:
   enabled: true
   cooldown_seconds: 1800
+
+market_ranker:
+  score_weights:
+    liquidity: 5
+    volume_h24: 4
+    txns_h24: 3
+    age: 5
+
+  watchlist_retention:
+    enabled: true
+    max_entries: 500
+    archive_removed: true
+    archive_file: "data/watchlist_archive.jsonl"
+    unranked_retention_hours: 6
+    pending_retention_hours: 12
+    blocked_old_market_retention_hours: 6
+    low_score_retention_hours: 24
+    low_score_threshold: 35

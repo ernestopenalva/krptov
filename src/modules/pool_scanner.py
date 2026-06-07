@@ -28,6 +28,8 @@ NATIVE_ETH_ADDRESS = "0x0000000000000000000000000000000000000000"
 PAIR_CREATED_TOPIC = "0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9"
 POOL_CREATED_TOPIC = "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118"
 INITIALIZE_TOPIC = "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438"
+AERODROME_POOL_CREATED_TOPIC = "0x2128d88d14c80cb081c1252a5acff7a264671bf199ce226b53788fb26065005e"
+AERODROME_SLIPSTREAM_POOL_CREATED_TOPIC = "0xab0d57f0df537bb25e80245ef7748fa62353808c54d6e528a9dd20887aed9ac2"
 
 SOURCE_TYPES = {
     "uniswap_v2_factory": {
@@ -47,6 +49,18 @@ SOURCE_TYPES = {
         "topic": INITIALIZE_TOPIC,
         "decoder": "decode_uniswap_v4_initialize",
         "address_field": "pool_manager_address",
+    },
+    "aerodrome_pool_factory": {
+        "event": "PoolCreated",
+        "topic": AERODROME_POOL_CREATED_TOPIC,
+        "decoder": "decode_aerodrome_pool_created",
+        "address_field": "factory_address",
+    },
+    "aerodrome_slipstream_factory": {
+        "event": "PoolCreated",
+        "topic": AERODROME_SLIPSTREAM_POOL_CREATED_TOPIC,
+        "decoder": "decode_aerodrome_slipstream_pool_created",
+        "address_field": "factory_address",
     },
 }
 
@@ -132,6 +146,17 @@ def decode_data_int(data, word_index):
     return value
 
 
+def decode_topic_bool(topic):
+    return bool(decode_uint(topic))
+
+
+def decode_topic_int(topic):
+    value = decode_uint(topic)
+    if value >= 1 << 255:
+        value -= 1 << 256
+    return value
+
+
 def decode_uniswap_v2_pair_created(log):
     topics = log["topics"]
     return {
@@ -167,10 +192,35 @@ def decode_uniswap_v4_initialize(log):
     }
 
 
+def decode_aerodrome_pool_created(log):
+    topics = log["topics"]
+    return {
+        "token0": decode_topic_address(topics[1]),
+        "token1": decode_topic_address(topics[2]),
+        "stable": decode_topic_bool(topics[3]),
+        "pool_address": decode_data_address(log["data"], 0),
+        "pool_index": decode_data_uint(log["data"], 1),
+        "fee": None,
+    }
+
+
+def decode_aerodrome_slipstream_pool_created(log):
+    topics = log["topics"]
+    return {
+        "token0": decode_topic_address(topics[1]),
+        "token1": decode_topic_address(topics[2]),
+        "tick_spacing": decode_topic_int(topics[3]),
+        "pool_address": decode_data_address(log["data"], 0),
+        "fee": None,
+    }
+
+
 DECODERS = {
     "decode_uniswap_v2_pair_created": decode_uniswap_v2_pair_created,
     "decode_uniswap_v3_pool_created": decode_uniswap_v3_pool_created,
     "decode_uniswap_v4_initialize": decode_uniswap_v4_initialize,
+    "decode_aerodrome_pool_created": decode_aerodrome_pool_created,
+    "decode_aerodrome_slipstream_pool_created": decode_aerodrome_slipstream_pool_created,
 }
 
 
@@ -504,6 +554,10 @@ def print_pool_event(chain, source, decoded_event, candidate, ignored_reason, dr
         print(f"Token 1: {decoded_event['token1']}")
         print(f"Pool:    {decoded_event['pool_address']}")
 
+    if "stable" in decoded_event:
+        print(f"Stable:  {decoded_event['stable']}")
+    if source["type"] == "aerodrome_slipstream_factory":
+        print(f"Tick spacing: {decoded_event['tick_spacing']}")
     if decoded_event.get("fee") is not None:
         print(f"Fee:     {decoded_event['fee']}")
 

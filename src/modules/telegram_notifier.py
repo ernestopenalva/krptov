@@ -70,6 +70,54 @@ def format_number(value):
         return str(value)
 
 
+def dexscreener_chain_slug(chain_id):
+    if chain_id == "ethereum":
+        return "ethereum"
+    if chain_id == "base":
+        return "base"
+    return chain_id
+
+
+def build_dexscreener_url(chain_id, token_address):
+    if not chain_id or not token_address:
+        return None
+
+    return f"https://dexscreener.com/{dexscreener_chain_slug(chain_id)}/{token_address}"
+
+
+def format_alert_reason(reason):
+    reason = str(reason or "").strip()
+    if not reason:
+        return None
+
+    if reason.startswith("author_followers_") and ">=" in reason:
+        level, followers = reason.split(">=", 1)
+        level = level.replace("author_followers_", "")
+        level_text = {
+            "medium": "boa audiência",
+            "high": "grande audiência",
+            "critical": "audiência muito alta",
+        }.get(level, "audiência relevante")
+        return f"Autor com {level_text} ({format_number(followers)} seguidores)"
+
+    if reason == "author_verified_business":
+        return "Autor com verificação empresarial"
+    if reason == "author_verified_government":
+        return "Autor com verificação governamental"
+    if reason == "author_affiliation":
+        return "Autor vinculado a uma organização"
+    if reason == "automated_operator_detected":
+        return "Post indica operador ou automação por trás do token"
+
+    return reason.replace("_", " ")
+
+
+def format_alert_reasons(reasons):
+    formatted = [format_alert_reason(reason) for reason in (reasons or [])]
+    formatted = [reason for reason in formatted if reason]
+    return "; ".join(formatted) if formatted else "nenhum"
+
+
 def first_trigger_post(alert):
     posts = alert.get("trigger_posts") or []
     if not posts:
@@ -95,10 +143,14 @@ def build_alert_message(alert, entry=None):
     chain_id = alert.get("chain_id") or entry.get("chain_id") or entry.get("chain") or "unknown"
     token_address = alert.get("token_address") or entry.get("token_address")
     reasons = alert.get("alert_reasons") or []
-    reason_text = ", ".join(str(reason) for reason in reasons) if reasons else "nenhum"
+    reason_text = format_alert_reasons(reasons)
     author = alert.get("author_username") or trigger_post.get("author_username") or "indisponivel"
     followers = alert.get("author_followers") or alert.get("best_author_followers")
-    dex_url = (entry.get("selected_pair") or {}).get("url") or entry.get("dexscreener_url")
+    dex_url = (
+        (entry.get("selected_pair") or {}).get("url")
+        or entry.get("dexscreener_url")
+        or build_dexscreener_url(chain_id, token_address)
+    )
     post_url = trigger_post.get("url")
 
     lines = [
@@ -106,7 +158,6 @@ def build_alert_message(alert, entry=None):
         f"<b>Rank:</b> {escape_html(alert.get('alert_rank', 'indisponivel'))}",
         f"<b>Token:</b> {escape_html(token_name)} / {escape_html(token_symbol)}",
         f"<b>Chain:</b> {escape_html(chain_id)}",
-        f"<b>Endereco:</b> <code>{escape_html(short_address(token_address))}</code>",
         f"<b>Motivos:</b> {escape_html(reason_text)}",
         f"<b>Autor:</b> @{escape_html(author)}",
         f"<b>Seguidores:</b> {escape_html(format_number(followers))}",

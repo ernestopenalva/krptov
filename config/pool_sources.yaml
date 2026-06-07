@@ -28,3 +28,32 @@ chains:
         type: uniswap_v4_pool_manager
         pool_manager_address: "0x000000000004444c5dc75cB358380D2e3dE08A90"
         event: Initialize
+  base:
+    enabled: true
+    rpc_env: ALCHEMY_BASE_WSS_URL
+    quote_tokens:
+      WETH: "0x4200000000000000000000000000000000000006"
+      ETH: "0x0000000000000000000000000000000000000000"
+      USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+      USDbC: "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA"
+    sources:
+      - name: aerodrome
+        enabled: true
+        type: aerodrome_pool_factory
+        factory_address: "0x420DD381b31aEf6683db6B902084cB0FFECe40Da"
+        event: PoolCreated
+      - name: aerodrome_slipstream
+        enabled: true
+        type: aerodrome_slipstream_factory
+        factory_address: "0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A"
+        event: PoolCreated
+      - name: uniswap_v4
+        enabled: true
+        type: uniswap_v4_pool_manager
+        pool_manager_address: "0x498581fF718922c3f8e6A244956aF099B2652b2b"
+        event: Initialize
+      - name: uniswap_v3
+        enabled: true
+        type: uniswap_v3_factory
+        factory_address: "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
+        event: PoolCreated

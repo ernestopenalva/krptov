@@ -39,13 +39,26 @@ SOCIAL_ELIGIBILITY_REASON_FRESH_MARKET = "fresh_market"
 SOCIAL_ELIGIBILITY_REASON_OLD_MARKET = "old_market"
 SOCIAL_ELIGIBILITY_MAX_MARKET_AGE_HOURS = 24
 
-WEIGHT_LIQUIDITY = 5
-WEIGHT_VOLUME = 4
-WEIGHT_TXNS = 3
-WEIGHT_AGE = 5
-TOTAL_WEIGHT = WEIGHT_LIQUIDITY + WEIGHT_VOLUME + WEIGHT_TXNS + WEIGHT_AGE
-
 DEFAULT_CONFIG = {
+    "market_ranker": {
+        "score_weights": {
+            "liquidity": 5,
+            "volume_h24": 4,
+            "txns_h24": 3,
+            "age": 5,
+        },
+        "watchlist_retention": {
+            "enabled": True,
+            "max_entries": 500,
+            "archive_removed": True,
+            "archive_file": "data/watchlist_archive.jsonl",
+            "unranked_retention_hours": 6,
+            "pending_retention_hours": 12,
+            "blocked_old_market_retention_hours": 6,
+            "low_score_retention_hours": 24,
+            "low_score_threshold": 35,
+        },
+    },
     "ops_alerts": {
         "enabled": True,
         "cooldown_seconds": OPS_ALERT_DEFAULT_COOLDOWN_SECONDS,
@@ -153,13 +166,39 @@ def load_simple_yaml_sections(config_file, section_names):
 
 
 def load_config(config_file=CONFIG_FILE):
-    config = DEFAULT_CONFIG.copy()
-    loaded_sections = load_simple_yaml_sections(config_file, {"ops_alerts"})
+    config = merge_dict({}, DEFAULT_CONFIG)
+    loaded_sections = load_simple_yaml_sections(config_file, {"market_ranker", "ops_alerts"})
+    config["market_ranker"] = merge_dict(
+        config.get("market_ranker", {}),
+        loaded_sections.get("market_ranker", {}),
+    )
     config["ops_alerts"] = merge_dict(
         config.get("ops_alerts", {}),
         loaded_sections.get("ops_alerts", {}),
     )
     return config
+
+
+def market_ranker_config(config):
+    return (config or {}).get("market_ranker") or {}
+
+
+def score_weights(config):
+    configured = market_ranker_config(config).get("score_weights") or {}
+    defaults = DEFAULT_CONFIG["market_ranker"]["score_weights"]
+    weights = {}
+
+    for key, default_value in defaults.items():
+        try:
+            value = float(configured.get(key, default_value))
+        except (TypeError, ValueError):
+            value = float(default_value)
+        weights[key] = max(0.0, value)
+
+    if sum(weights.values()) <= 0:
+        return defaults.copy()
+
+    return weights
 
 
 def normalize_evm_address(address):
@@ -720,7 +759,13 @@ def token_start_time(entry):
     return parse_iso(entry.get("created_at_utc")) or parse_iso(entry.get("discovered_at_utc"))
 
 
-def calculate_market_score(pair, entry, current_time):
+def calculate_market_score(pair, entry, current_time, weights=None):
+    weights = weights or DEFAULT_CONFIG["market_ranker"]["score_weights"]
+    total_weight = sum(float(value) for value in weights.values())
+    if total_weight <= 0:
+        weights = DEFAULT_CONFIG["market_ranker"]["score_weights"]
+        total_weight = sum(float(value) for value in weights.values())
+
     start_time = token_start_time(entry)
     age_minutes = None
     if start_time:
@@ -737,11 +782,11 @@ def calculate_market_score(pair, entry, current_time):
         "age": component_age(age_minutes),
     }
     score = (
-        components["liquidity"] * WEIGHT_LIQUIDITY
-        + components["volume_h24"] * WEIGHT_VOLUME
-        + components["txns_h24"] * WEIGHT_TXNS
-        + components["age"] * WEIGHT_AGE
-    ) / TOTAL_WEIGHT
+        components["liquidity"] * weights["liquidity"]
+        + components["volume_h24"] * weights["volume_h24"]
+        + components["txns_h24"] * weights["txns_h24"]
+        + components["age"] * weights["age"]
+    ) / total_weight
 
     return round(score, 2), components, {
         "liquidity_usd": liquidity,
@@ -846,6 +891,191 @@ def update_watchlist_market_fields(updates_by_key):
         atomic_save_json(WATCHLIST_FILE, watchlist)
 
 
+def retention_config(config):
+    configured = market_ranker_config(config).get("watchlist_retention") or {}
+    defaults = DEFAULT_CONFIG["market_ranker"]["watchlist_retention"]
+    return merge_dict(defaults, configured)
+
+
+def config_int(config, key, default_value):
+    try:
+        return int(config.get(key, default_value))
+    except (TypeError, ValueError):
+        return int(default_value)
+
+
+def config_float(config, key, default_value):
+    try:
+        return float(config.get(key, default_value))
+    except (TypeError, ValueError):
+        return float(default_value)
+
+
+def retention_archive_path(config):
+    archive_file = config.get("archive_file") or DEFAULT_CONFIG["market_ranker"]["watchlist_retention"]["archive_file"]
+    archive_path = Path(archive_file)
+    if not archive_path.is_absolute():
+        archive_path = PROJECT_ROOT / archive_path
+    return archive_path
+
+
+def numeric_or_none(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def entry_reference_time(entry):
+    for field in (
+        "social_eligibility_updated_at",
+        "last_seen_at_utc",
+        "created_at_utc",
+        "discovered_at_utc",
+    ):
+        parsed = parse_iso(entry.get(field))
+        if parsed:
+            return parsed
+    return None
+
+
+def entry_age_hours(entry, current_time):
+    reference_time = entry_reference_time(entry)
+    if not reference_time:
+        return 0
+    return max(0, (current_time - reference_time).total_seconds() / 3600)
+
+
+def is_retention_protected(entry):
+    return (
+        entry.get("status") == STATUS_ATIVO
+        or entry.get("social_status") == STATUS_ATIVO
+        or entry.get("monitor_status") == STATUS_ATIVO
+        or entry.get("telegram_alert_sent") is True
+    )
+
+
+def retention_reason(entry, config, current_time):
+    if is_retention_protected(entry):
+        return None
+
+    age_hours = entry_age_hours(entry, current_time)
+    social_eligibility = entry.get("social_eligibility")
+    market_score = numeric_or_none(entry.get("market_score"))
+
+    if social_eligibility == SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET:
+        if age_hours >= config_int(config, "blocked_old_market_retention_hours", 6):
+            return "retention_blocked_old_market"
+        return None
+
+    if social_eligibility == SOCIAL_ELIGIBILITY_PENDING:
+        if age_hours >= config_int(config, "pending_retention_hours", 12):
+            return "retention_pending_dexscreener"
+        return None
+
+    if social_eligibility is None and market_score is None:
+        if age_hours >= config_int(config, "unranked_retention_hours", 6):
+            return "retention_unranked"
+        return None
+
+    low_score_threshold = config_float(config, "low_score_threshold", 35)
+    if market_score is not None and market_score < low_score_threshold:
+        if age_hours >= config_int(config, "low_score_retention_hours", 24):
+            return "retention_low_market_score"
+
+    return None
+
+
+def blind_cap_sort_key(item):
+    watchlist_key, entry = item
+    score = numeric_or_none(entry.get("market_score"))
+    score_value = score if score is not None else -1
+    eligibility = entry.get("social_eligibility")
+    eligibility_rank = {
+        SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET: 0,
+        SOCIAL_ELIGIBILITY_PENDING: 1,
+        None: 2,
+        SOCIAL_ELIGIBILITY_ELIGIBLE: 3,
+    }.get(eligibility, 2)
+    reference_time = entry_reference_time(entry) or datetime.min.replace(tzinfo=timezone.utc)
+    return (eligibility_rank, score_value, reference_time, watchlist_key)
+
+
+def archive_removed_watchlist_entries(records, config, current_time):
+    if not records or not config.get("archive_removed", True):
+        return
+
+    path = retention_archive_path(config)
+    for record in records:
+        append_jsonl(
+            path,
+            {
+                "archived_at_utc": to_iso(current_time),
+                **record,
+            },
+        )
+
+
+def apply_watchlist_retention(config, current_time):
+    config = retention_config(config)
+    if not config.get("enabled", True):
+        return {"enabled": False, "removed": 0, "max_entries": None, "remaining": None}
+
+    max_entries = config_int(config, "max_entries", 500)
+    removed_records = []
+
+    with watchlist_lock():
+        watchlist = load_watchlist()
+        kept = {}
+
+        for watchlist_key, entry in watchlist.items():
+            if not isinstance(entry, dict):
+                kept[watchlist_key] = entry
+                continue
+
+            reason = retention_reason(entry, config, current_time)
+            if reason:
+                removed_records.append(
+                    {
+                        "reason": reason,
+                        "watchlist_key": watchlist_key,
+                        "entry": entry,
+                    }
+                )
+                continue
+
+            kept[watchlist_key] = entry
+
+        if max_entries > 0 and len(kept) > max_entries:
+            removable = [
+                (watchlist_key, entry)
+                for watchlist_key, entry in kept.items()
+                if isinstance(entry, dict) and not is_retention_protected(entry)
+            ]
+            removable.sort(key=blind_cap_sort_key)
+            excess = len(kept) - max_entries
+            for watchlist_key, entry in removable[:excess]:
+                kept.pop(watchlist_key, None)
+                removed_records.append(
+                    {
+                        "reason": "retention_blind_cap",
+                        "watchlist_key": watchlist_key,
+                        "entry": entry,
+                    }
+                )
+
+        if removed_records:
+            atomic_save_json(WATCHLIST_FILE, kept)
+
+    archive_removed_watchlist_entries(removed_records, config, current_time)
+    return {
+        "enabled": True,
+        "removed": len(removed_records),
+        "max_entries": max_entries,
+        "remaining": len(kept) if removed_records else len(load_watchlist()),
+    }
+
+
 def print_summary(summary, results):
     print("=== KRPTO-V | Market Ranker ===")
     print(f"Versao: {MARKET_RANKER_VERSION}")
@@ -857,6 +1087,14 @@ def print_summary(summary, results):
     print(f"Encontrados na Dexscreener: {summary['dex_found']}")
     print(f"Nao encontrados: {summary['dex_not_found']}")
     print(f"Erros: {summary['errors']}")
+    retention = summary.get("watchlist_retention") or {}
+    if retention.get("enabled"):
+        print(
+            "Retencao WL: "
+            f"removidos={retention.get('removed', 0)} | "
+            f"restantes={retention.get('remaining')} | "
+            f"teto={retention.get('max_entries')}"
+        )
     if "ops_alert_sent" in summary:
         print(f"Alerta operacional enviado: {str(summary['ops_alert_sent']).lower()}")
         if summary.get("ops_alert_message_id") is not None:
@@ -905,6 +1143,7 @@ def print_summary(summary, results):
 def run_cycle(dry_run=False, session=requests):
     ensure_directories()
     config = load_config()
+    weights = score_weights(config)
     current_time = utc_now()
     now_text = to_iso(current_time)
     watchlist = load_watchlist()
@@ -955,6 +1194,7 @@ def run_cycle(dry_run=False, session=requests):
                     selected_pair,
                     token["entry"],
                     current_time,
+                    weights=weights,
                 )
                 dex_found += 1
             else:
@@ -1003,6 +1243,9 @@ def run_cycle(dry_run=False, session=requests):
 
     if not dry_run:
         update_watchlist_market_fields(updates_by_key)
+        retention_summary = apply_watchlist_retention(config, current_time)
+    else:
+        retention_summary = {"enabled": False, "removed": 0, "max_entries": None, "remaining": len(watchlist)}
 
     summary = {
         "timestamp": now_text,
@@ -1013,6 +1256,8 @@ def run_cycle(dry_run=False, session=requests):
         "dex_not_found": dex_not_found,
         "errors": errors,
         "dex_batch_calls": dex_batch_calls,
+        "market_score_weights": weights,
+        "watchlist_retention": retention_summary,
     }
     ops_alert_result = maybe_send_ops_alert(summary, results, current_time, config=config)
     if ops_alert_result and ops_alert_result.get("success"):

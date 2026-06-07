@@ -247,8 +247,30 @@ class TelegramNotifierTests(unittest.TestCase):
         self.assertIn("A&amp;B &lt;Coin&gt;", message)
         self.assertIn("A&lt;B", message)
         self.assertIn("alice&lt;admin&gt;", message)
-        self.assertIn("name_&lt;bad&gt;&amp;reason", message)
+        self.assertIn("name &lt;bad&gt;&amp;reason", message)
         self.assertNotIn("A&B <Coin>", message)
+
+    def test_alert_message_uses_human_reasons_and_dexscreener_link(self):
+        token_address = "0xe24659c4567af33a332fe4dfea2b38f40e9487c5"
+        alert = {
+            "alert_rank": 20,
+            "chain_id": "ethereum",
+            "token_address": token_address,
+            "alert_reasons": ["author_followers_medium>=7528"],
+            "author_username": "BlackhatEmpire",
+            "author_followers": 7528,
+            "trigger_posts": [{"url": "https://x.com/BlackhatEmpire/status/2062941605099667783"}],
+        }
+
+        message = telegram_notifier.build_alert_message(alert, {})
+
+        self.assertNotIn("<b>Endereco:</b>", message)
+        self.assertIn("Autor com boa audiência (7.528 seguidores)", message)
+        self.assertIn(
+            f"<b>Dexscreener:</b> https://dexscreener.com/ethereum/{token_address}",
+            message,
+        )
+        self.assertIn(f"<b>Endereco completo:</b> <code>{token_address}</code>", message)
 
 
 class SocialInferenceTelegramTests(unittest.TestCase):
@@ -277,6 +299,8 @@ class SocialInferenceTelegramTests(unittest.TestCase):
                             "status": "novo",
                             "social_status": "pendente",
                             "monitor_status": "pendente",
+                            "social_eligibility": "eligible",
+                            "market_score": 80,
                             "telegram_alert_sent": False,
                         }
                     }

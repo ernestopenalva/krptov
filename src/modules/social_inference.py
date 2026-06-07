@@ -27,8 +27,11 @@ STATUS_REASON_SOCIAL_TIMEOUT = "social_timeout"
 SOCIAL_STATUS_PENDENTE = "pendente"
 SOCIAL_STATUS_ATIVO = "ativo"
 SOCIAL_STATUS_CONCLUIDO = "concluido"
+SOCIAL_ELIGIBILITY_ELIGIBLE = "eligible"
 SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET = "blocked_old_market"
 SOCIAL_SKIP_REASON_OLD_MARKET = "social_eligibility_blocked_old_market"
+SOCIAL_SKIP_REASON_NOT_ELIGIBLE = "social_eligibility_not_eligible"
+SOCIAL_SKIP_REASON_MISSING_MARKET_SCORE = "missing_numeric_market_score"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
@@ -52,6 +55,8 @@ DEFAULT_CONFIG = {
     "max_tokens_per_cycle": 0,
     "max_new_tokens_per_cycle": 0,
     "prioritize_market_score": True,
+    "require_social_eligibility": SOCIAL_ELIGIBILITY_ELIGIBLE,
+    "require_numeric_market_score": True,
     "followers_alert_threshold": 2000,
     "excluded_author_usernames": [
         "dexsignals",
@@ -380,6 +385,13 @@ def numeric_value(value, default=0):
         return default
 
 
+def numeric_or_none(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def sort_timestamp(value):
     parsed = parse_iso(value)
     if not parsed:
@@ -413,7 +425,30 @@ def social_candidate_sort_key(candidate):
     return (1, -market_score, tuple(-item for item in created_sort))
 
 
-def build_social_candidates(watchlist, config):
+def limit_social_candidates(candidates, config):
+    max_tokens = int(config.get("max_tokens_per_cycle") or 0)
+    max_new_tokens = int(config.get("max_new_tokens_per_cycle") or 0)
+    if max_tokens <= 0 and max_new_tokens <= 0:
+        return candidates
+
+    limited = []
+    new_count = 0
+
+    for candidate in candidates:
+        if max_tokens > 0 and len(limited) >= max_tokens:
+            break
+
+        if candidate["entry"].get("status") == STATUS_NOVO:
+            if max_new_tokens > 0 and new_count >= max_new_tokens:
+                continue
+            new_count += 1
+
+        limited.append(candidate)
+
+    return limited
+
+
+def build_social_candidates(watchlist, config, apply_limits=True):
     candidates = []
 
     for watchlist_key, entry in watchlist.items():
@@ -437,30 +472,28 @@ def build_social_candidates(watchlist, config):
     if config.get("prioritize_market_score", True):
         candidates.sort(key=social_candidate_sort_key)
 
-    max_tokens = int(config.get("max_tokens_per_cycle") or 0)
-    max_new_tokens = int(config.get("max_new_tokens_per_cycle") or 0)
-    if max_tokens <= 0 and max_new_tokens <= 0:
+    if not apply_limits:
         return candidates
 
-    limited = []
-    new_count = 0
-
-    for candidate in candidates:
-        if max_tokens > 0 and len(limited) >= max_tokens:
-            break
-
-        if candidate["entry"].get("status") == STATUS_NOVO:
-            if max_new_tokens > 0 and new_count >= max_new_tokens:
-                continue
-            new_count += 1
-
-        limited.append(candidate)
-
-    return limited
+    return limit_social_candidates(candidates, config)
 
 
 def is_social_eligibility_blocked(entry):
     return entry.get("social_eligibility") == SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET
+
+
+def social_query_skip_reason(entry, config):
+    required_eligibility = config.get("require_social_eligibility")
+    if required_eligibility and entry.get("social_eligibility") != required_eligibility:
+        if is_social_eligibility_blocked(entry):
+            return SOCIAL_SKIP_REASON_OLD_MARKET
+        return SOCIAL_SKIP_REASON_NOT_ELIGIBLE
+
+    if config.get("require_numeric_market_score", True):
+        if numeric_or_none(entry.get("market_score")) is None:
+            return SOCIAL_SKIP_REASON_MISSING_MARKET_SCORE
+
+    return None
 
 
 def load_bearer_token():
@@ -1415,6 +1448,7 @@ def print_summary(snapshot):
         f"Tokens expirados: {snapshot['tokens_expired']}",
         f"Tokens bloqueados pelo limite diario: {snapshot.get('tokens_blocked_by_daily_limit', 0)}",
         f"Tokens bloqueados por social_eligibility: {snapshot.get('tokens_blocked_by_social_eligibility', 0)}",
+        f"Tokens bloqueados por market_score: {snapshot.get('tokens_blocked_by_market_score', 0)}",
         f"Erros: {len(snapshot['errors'])}",
     ]
 
@@ -1438,11 +1472,12 @@ def run_cycle(config_file=CONFIG_FILE):
             "timestamp": now_text,
             "version": SOCIAL_INFERENCE_VERSION,
             "enabled": False,
-    "tokens_checked": 0,
+            "tokens_checked": 0,
             "alerts_generated": 0,
             "tokens_expired": 0,
             "tokens_blocked_by_daily_limit": 0,
             "tokens_blocked_by_social_eligibility": 0,
+            "tokens_blocked_by_market_score": 0,
             "errors": [],
         }
         atomic_save_json(LATEST_SNAPSHOT_FILE, snapshot)
@@ -1461,6 +1496,7 @@ def run_cycle(config_file=CONFIG_FILE):
             "tokens_expired": 0,
             "tokens_blocked_by_daily_limit": 0,
             "tokens_blocked_by_social_eligibility": 0,
+            "tokens_blocked_by_market_score": 0,
             "errors": [error],
         }
         atomic_save_json(LATEST_SNAPSHOT_FILE, snapshot)
@@ -1477,9 +1513,44 @@ def run_cycle(config_file=CONFIG_FILE):
     tokens_expired = 0
     tokens_blocked_by_daily_limit = 0
     tokens_blocked_by_social_eligibility = 0
+    tokens_blocked_by_market_score = 0
     with watchlist_lock():
         watchlist = load_watchlist(WATCHLIST_FILE)
-        social_candidates = build_social_candidates(watchlist, config)
+        all_social_candidates = build_social_candidates(watchlist, config, apply_limits=False)
+        eligible_social_candidates = []
+
+        for candidate in all_social_candidates:
+            entry = candidate["entry"]
+            status_before = entry.get("status")
+            expires_at = parse_iso(entry.get("social_monitoring_expires_at"))
+            if status_before == STATUS_ATIVO and expires_at and current_time >= expires_at:
+                expire_social_monitoring(entry, current_time)
+                tokens_expired += 1
+                history_record = build_history_record(
+                    token_address=candidate["token_address"],
+                    status_before=status_before,
+                    entry=entry,
+                    analysis=empty_analysis(),
+                    alert_generated=False,
+                    current_time=current_time,
+                    watchlist_key=candidate["watchlist_key"],
+                )
+                append_jsonl(DATA_DIR / f"social_inference_{date_stamp}.jsonl", history_record)
+                continue
+
+            skip_reason = social_query_skip_reason(entry, config)
+            if not skip_reason:
+                eligible_social_candidates.append(candidate)
+                continue
+
+            entry["social_last_skipped_at"] = now_text
+            entry["social_skip_reason"] = skip_reason
+            if skip_reason == SOCIAL_SKIP_REASON_MISSING_MARKET_SCORE:
+                tokens_blocked_by_market_score += 1
+            else:
+                tokens_blocked_by_social_eligibility += 1
+
+        social_candidates = limit_social_candidates(eligible_social_candidates, config)
 
         for candidate in social_candidates:
             watchlist_key = candidate["watchlist_key"]
@@ -1489,28 +1560,6 @@ def run_cycle(config_file=CONFIG_FILE):
             status_before = entry.get("status")
 
             starting_new_social_token = status_before == STATUS_NOVO or needs_social_monitoring_start(entry)
-            expires_at = parse_iso(entry.get("social_monitoring_expires_at"))
-            if status_before == STATUS_ATIVO and expires_at and current_time >= expires_at:
-                expire_social_monitoring(entry, current_time)
-                tokens_expired += 1
-                history_record = build_history_record(
-                    token_address=normalized_address,
-                    status_before=status_before,
-                    entry=entry,
-                    analysis=empty_analysis(),
-                    alert_generated=False,
-                    current_time=current_time,
-                    watchlist_key=watchlist_key,
-                )
-                append_jsonl(DATA_DIR / f"social_inference_{date_stamp}.jsonl", history_record)
-                continue
-
-            if is_social_eligibility_blocked(entry):
-                entry["social_last_skipped_at"] = now_text
-                entry["social_skip_reason"] = SOCIAL_SKIP_REASON_OLD_MARKET
-                tokens_blocked_by_social_eligibility += 1
-                continue
-
             if starting_new_social_token and not can_start_new_social_token(config, daily_usage):
                 entry["social_last_skipped_at"] = now_text
                 entry["social_skip_reason"] = "daily_new_token_limit"
@@ -1636,6 +1685,7 @@ def run_cycle(config_file=CONFIG_FILE):
         "tokens_expired": tokens_expired,
         "tokens_blocked_by_daily_limit": tokens_blocked_by_daily_limit,
         "tokens_blocked_by_social_eligibility": tokens_blocked_by_social_eligibility,
+        "tokens_blocked_by_market_score": tokens_blocked_by_market_score,
         "errors": errors,
     }
 

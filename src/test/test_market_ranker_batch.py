@@ -128,6 +128,65 @@ class MarketRankerBatchTests(unittest.TestCase):
             self.assertIn("/tokens/v1/ethereum/", session.urls[0])
             self.assertIn(f"{token_a},{token_b}", session.urls[0])
 
+    def test_watchlist_retention_applies_blind_cap_without_removing_protected(self):
+        current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            watchlist_file = root / "watchlist.json"
+            lock_file = root / "watchlist.lock"
+            archive_file = root / "archive.jsonl"
+            protected_token = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            low_token = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            high_token = "0xcccccccccccccccccccccccccccccccccccccccc"
+            watchlist_file.write_text(
+                json.dumps(
+                    {
+                        f"ethereum:{protected_token}": {
+                            **token_entry(protected_token, f"ethereum:{protected_token}"),
+                            "status": "ativo",
+                            "social_eligibility": "eligible",
+                            "market_score": 1,
+                        },
+                        f"ethereum:{low_token}": {
+                            **token_entry(low_token, f"ethereum:{low_token}"),
+                            "social_eligibility": "pending",
+                            "market_score": 5,
+                        },
+                        f"ethereum:{high_token}": {
+                            **token_entry(high_token, f"ethereum:{high_token}"),
+                            "social_eligibility": "eligible",
+                            "market_score": 90,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = {
+                "market_ranker": {
+                    "watchlist_retention": {
+                        "enabled": True,
+                        "max_entries": 2,
+                        "archive_removed": True,
+                        "archive_file": str(archive_file),
+                        "pending_retention_hours": 999,
+                    }
+                }
+            }
+
+            with patch.object(market_ranker, "WATCHLIST_FILE", watchlist_file), patch.object(
+                market_ranker, "WATCHLIST_LOCK_FILE", lock_file
+            ):
+                summary = market_ranker.apply_watchlist_retention(config, current_time)
+
+            updated = json.loads(watchlist_file.read_text(encoding="utf-8"))
+            self.assertEqual(summary["removed"], 1)
+            self.assertIn(f"ethereum:{protected_token}", updated)
+            self.assertIn(f"ethereum:{high_token}", updated)
+            self.assertNotIn(f"ethereum:{low_token}", updated)
+            self.assertTrue(archive_file.exists())
+            self.assertIn("retention_blind_cap", archive_file.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()
