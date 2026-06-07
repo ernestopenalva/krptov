@@ -9,7 +9,7 @@ from pathlib import Path
 
 import requests
 
-from src.modules import telegram_notifier
+from src.modules import telegram_notifier, token_age_resolver
 
 
 MARKET_RANKER_VERSION = "krptov-market-ranker-v1-2026-06-03"
@@ -34,9 +34,13 @@ STATUS_ATIVO = "ativo"
 SOCIAL_ELIGIBILITY_PENDING = "pending"
 SOCIAL_ELIGIBILITY_ELIGIBLE = "eligible"
 SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET = "blocked_old_market"
+SOCIAL_ELIGIBILITY_PENDING_TOKEN_AGE = "pending_token_age"
+SOCIAL_ELIGIBILITY_BLOCKED_OLD_TOKEN = "blocked_old_token"
 SOCIAL_ELIGIBILITY_REASON_PENDING_DEX = "pending_dexscreener"
+SOCIAL_ELIGIBILITY_REASON_PENDING_TOKEN_AGE = "pending_token_age"
 SOCIAL_ELIGIBILITY_REASON_FRESH_MARKET = "fresh_market"
 SOCIAL_ELIGIBILITY_REASON_OLD_MARKET = "old_market"
+SOCIAL_ELIGIBILITY_REASON_OLD_TOKEN = "old_token"
 SOCIAL_ELIGIBILITY_MAX_MARKET_AGE_HOURS = 24
 
 DEFAULT_CONFIG = {
@@ -57,6 +61,16 @@ DEFAULT_CONFIG = {
             "blocked_old_market_retention_hours": 6,
             "low_score_retention_hours": 24,
             "low_score_threshold": 35,
+        },
+        "token_age": {
+            "enabled": True,
+            "api_key_env": "ETHERSCAN_API_KEY",
+            "refresh_hours": 6,
+            "sleep_seconds": 0.2,
+        },
+        "social_eligibility": {
+            "max_token_age_minutes": 1440,
+            "max_pool_age_minutes": 1440,
         },
     },
     "ops_alerts": {
@@ -199,6 +213,18 @@ def score_weights(config):
         return defaults.copy()
 
     return weights
+
+
+def token_age_config(config):
+    configured = market_ranker_config(config).get("token_age") or {}
+    defaults = DEFAULT_CONFIG["market_ranker"]["token_age"]
+    return merge_dict(defaults, configured)
+
+
+def social_eligibility_config(config):
+    configured = market_ranker_config(config).get("social_eligibility") or {}
+    defaults = DEFAULT_CONFIG["market_ranker"]["social_eligibility"]
+    return merge_dict(defaults, configured)
 
 
 def normalize_evm_address(address):
@@ -659,7 +685,8 @@ def select_oldest_pair(pairs):
     return min(dated_pairs, key=lambda item: item[0])[1]
 
 
-def calculate_social_eligibility(pairs, selected_pair, current_time):
+def calculate_social_eligibility(pairs, selected_pair, token_entry, current_time, config=None):
+    config = config or DEFAULT_CONFIG["market_ranker"]["social_eligibility"]
     if not selected_pair:
         return {
             "social_eligibility": SOCIAL_ELIGIBILITY_PENDING,
@@ -683,20 +710,51 @@ def calculate_social_eligibility(pairs, selected_pair, current_time):
         }
 
     oldest_age_minutes = max(0, (current_time - oldest_created_at).total_seconds() / 60)
-    max_age_minutes = SOCIAL_ELIGIBILITY_MAX_MARKET_AGE_HOURS * 60
-    is_old_market = oldest_age_minutes > max_age_minutes
+    max_pool_age_minutes = float(
+        config.get("max_pool_age_minutes")
+        or SOCIAL_ELIGIBILITY_MAX_MARKET_AGE_HOURS * 60
+    )
+    if oldest_age_minutes > max_pool_age_minutes:
+        return {
+            "social_eligibility": SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET,
+            "social_eligibility_reason": SOCIAL_ELIGIBILITY_REASON_OLD_MARKET,
+            "oldest_pair_created_at_utc": to_iso(oldest_created_at),
+            "oldest_pair_age_minutes": round(oldest_age_minutes, 2),
+            "selected_pair_created_at_utc": to_iso(selected_created_at) if selected_created_at else None,
+        }
+
+    if token_entry.get("token_age_status") != token_age_resolver.TOKEN_AGE_STATUS_RESOLVED:
+        return {
+            "social_eligibility": SOCIAL_ELIGIBILITY_PENDING_TOKEN_AGE,
+            "social_eligibility_reason": SOCIAL_ELIGIBILITY_REASON_PENDING_TOKEN_AGE,
+            "oldest_pair_created_at_utc": to_iso(oldest_created_at),
+            "oldest_pair_age_minutes": round(oldest_age_minutes, 2),
+            "selected_pair_created_at_utc": to_iso(selected_created_at) if selected_created_at else None,
+        }
+
+    token_age_minutes = numeric_or_none(token_entry.get("token_age_minutes"))
+    max_token_age_minutes = float(config.get("max_token_age_minutes") or 1440)
+    if token_age_minutes is None:
+        return {
+            "social_eligibility": SOCIAL_ELIGIBILITY_PENDING_TOKEN_AGE,
+            "social_eligibility_reason": SOCIAL_ELIGIBILITY_REASON_PENDING_TOKEN_AGE,
+            "oldest_pair_created_at_utc": to_iso(oldest_created_at),
+            "oldest_pair_age_minutes": round(oldest_age_minutes, 2),
+            "selected_pair_created_at_utc": to_iso(selected_created_at) if selected_created_at else None,
+        }
+
+    if token_age_minutes > max_token_age_minutes:
+        return {
+            "social_eligibility": SOCIAL_ELIGIBILITY_BLOCKED_OLD_TOKEN,
+            "social_eligibility_reason": SOCIAL_ELIGIBILITY_REASON_OLD_TOKEN,
+            "oldest_pair_created_at_utc": to_iso(oldest_created_at),
+            "oldest_pair_age_minutes": round(oldest_age_minutes, 2),
+            "selected_pair_created_at_utc": to_iso(selected_created_at) if selected_created_at else None,
+        }
 
     return {
-        "social_eligibility": (
-            SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET
-            if is_old_market
-            else SOCIAL_ELIGIBILITY_ELIGIBLE
-        ),
-        "social_eligibility_reason": (
-            SOCIAL_ELIGIBILITY_REASON_OLD_MARKET
-            if is_old_market
-            else SOCIAL_ELIGIBILITY_REASON_FRESH_MARKET
-        ),
+        "social_eligibility": SOCIAL_ELIGIBILITY_ELIGIBLE,
+        "social_eligibility_reason": SOCIAL_ELIGIBILITY_REASON_FRESH_MARKET,
         "oldest_pair_created_at_utc": to_iso(oldest_created_at),
         "oldest_pair_age_minutes": round(oldest_age_minutes, 2),
         "selected_pair_created_at_utc": to_iso(selected_created_at) if selected_created_at else None,
@@ -982,8 +1040,13 @@ def retention_reason(entry, config, current_time):
     social_eligibility = entry.get("social_eligibility")
     market_score = numeric_or_none(entry.get("market_score"))
 
-    if social_eligibility == SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET:
+    if social_eligibility in {
+        SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET,
+        SOCIAL_ELIGIBILITY_BLOCKED_OLD_TOKEN,
+    }:
         if age_hours >= config_int(config, "blocked_old_market_retention_hours", 6):
+            if social_eligibility == SOCIAL_ELIGIBILITY_BLOCKED_OLD_TOKEN:
+                return "retention_blocked_old_token"
             return "retention_blocked_old_market"
         return None
 
@@ -1012,7 +1075,9 @@ def blind_cap_sort_key(item):
     eligibility = entry.get("social_eligibility")
     eligibility_rank = {
         SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET: 0,
+        SOCIAL_ELIGIBILITY_BLOCKED_OLD_TOKEN: 0,
         SOCIAL_ELIGIBILITY_PENDING: 1,
+        SOCIAL_ELIGIBILITY_PENDING_TOKEN_AGE: 1,
         None: 2,
         SOCIAL_ELIGIBILITY_ELIGIBLE: 3,
     }.get(eligibility, 2)
@@ -1106,6 +1171,15 @@ def print_summary(summary, results):
     print(f"Encontrados na Dexscreener: {summary['dex_found']}")
     print(f"Nao encontrados: {summary['dex_not_found']}")
     print(f"Erros: {summary['errors']}")
+    token_age = summary.get("token_age") or {}
+    if token_age.get("enabled"):
+        print(
+            "Token age: "
+            f"checados={token_age.get('checked', 0)} | "
+            f"resolvidos={token_age.get('resolved', 0)} | "
+            f"pendentes={token_age.get('unresolved', 0)} | "
+            f"erros={token_age.get('errors', 0)}"
+        )
     retention = summary.get("watchlist_retention") or {}
     if retention.get("enabled"):
         print(
@@ -1163,14 +1237,23 @@ def run_cycle(dry_run=False, session=requests):
     ensure_directories()
     config = load_config()
     weights = score_weights(config)
+    eligibility_config = social_eligibility_config(config)
     current_time = utc_now()
     now_text = to_iso(current_time)
     watchlist = load_watchlist()
     state = load_state()
     rankable_tokens = select_rankable_tokens(watchlist)
+    token_age_updates, token_age_summary = token_age_resolver.resolve_token_ages(
+        rankable_tokens,
+        config=token_age_config(config),
+        current_time=current_time,
+    )
 
     results = []
-    updates_by_key = {}
+    updates_by_key = {
+        watchlist_key: update.copy()
+        for watchlist_key, update in token_age_updates.items()
+    }
     dex_found = 0
     dex_not_found = 0
     errors = 0
@@ -1202,10 +1285,16 @@ def run_cycle(dry_run=False, session=requests):
 
             pairs = pairs_by_key.get(token["watchlist_key"], [])
             selected_pair, association_type = select_best_pair(pairs, token["entry"])
+            enriched_entry = {
+                **token["entry"],
+                **token_age_updates.get(token["watchlist_key"], {}),
+            }
             social_eligibility = calculate_social_eligibility(
                 pairs,
                 selected_pair,
+                enriched_entry,
                 current_time,
+                config=eligibility_config,
             )
             if selected_pair:
                 dex_status = "found"
@@ -1219,14 +1308,16 @@ def run_cycle(dry_run=False, session=requests):
             else:
                 dex_not_found += 1
 
-            updates_by_key[token["watchlist_key"]] = {
+            updates_by_key.setdefault(token["watchlist_key"], {}).update(
+                {
                 "social_eligibility": social_eligibility["social_eligibility"],
                 "social_eligibility_reason": social_eligibility["social_eligibility_reason"],
                 "social_eligibility_updated_at": now_text,
                 "oldest_pair_created_at_utc": social_eligibility["oldest_pair_created_at_utc"],
                 "oldest_pair_age_minutes": social_eligibility["oldest_pair_age_minutes"],
                 "selected_pair_created_at_utc": social_eligibility["selected_pair_created_at_utc"],
-            }
+                }
+            )
             if market_score is not None:
                 updates_by_key[token["watchlist_key"]]["market_score"] = market_score
                 updates_by_key[token["watchlist_key"]].update(metrics or {})
@@ -1280,6 +1371,7 @@ def run_cycle(dry_run=False, session=requests):
         "dex_not_found": dex_not_found,
         "errors": errors,
         "dex_batch_calls": dex_batch_calls,
+        "token_age": token_age_summary,
         "market_score_weights": weights,
         "watchlist_retention": retention_summary,
     }

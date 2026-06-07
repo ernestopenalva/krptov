@@ -68,6 +68,16 @@ market_ranker:
     txns_h24: 3
     age: 5
 
+  token_age:
+    enabled: true
+    api_key_env: ETHERSCAN_API_KEY
+    refresh_hours: 6
+    sleep_seconds: 0.2
+
+  social_eligibility:
+    max_token_age_minutes: 1440
+    max_pool_age_minutes: 1440
+
   watchlist_retention:
     enabled: true
     max_entries: 500

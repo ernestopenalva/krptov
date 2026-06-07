@@ -118,6 +118,24 @@ class MarketRankerBatchTests(unittest.TestCase):
                 market_ranker, "utc_now", return_value=current_time
             ), patch.object(
                 market_ranker, "maybe_send_ops_alert", return_value=None
+            ), patch.object(
+                market_ranker.token_age_resolver,
+                "resolve_token_ages",
+                return_value=(
+                    {
+                        key_a: {
+                            "token_age_status": "resolved",
+                            "token_age_minutes": 5,
+                            "token_created_at_utc": "2026-06-06T11:55:00Z",
+                        },
+                        key_b: {
+                            "token_age_status": "resolved",
+                            "token_age_minutes": 5,
+                            "token_created_at_utc": "2026-06-06T11:55:00Z",
+                        },
+                    },
+                    {"enabled": True, "checked": 2, "resolved": 2, "errors": 0},
+                ),
             ):
                 summary = market_ranker.run_cycle(dry_run=False, session=session)
 

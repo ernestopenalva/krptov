@@ -118,6 +118,19 @@ class SocialEligibilityTests(unittest.TestCase):
                 market_ranker, "DATA_DIR", root
             ), patch.object(
                 market_ranker, "utc_now", return_value=current_time
+            ), patch.object(
+                market_ranker.token_age_resolver,
+                "resolve_token_ages",
+                return_value=(
+                    {
+                        watchlist_key: {
+                            "token_age_status": "resolved",
+                            "token_age_minutes": 10,
+                            "token_created_at_utc": "2026-06-05T11:50:00Z",
+                        }
+                    },
+                    {"enabled": True, "checked": 1, "resolved": 1, "errors": 0},
+                ),
             ):
                 market_ranker.run_cycle(
                     dry_run=False,
@@ -131,6 +144,82 @@ class SocialEligibilityTests(unittest.TestCase):
             self.assertEqual(entry["oldest_pair_created_at_utc"], "2026-06-03T10:00:00Z")
             self.assertEqual(entry["selected_pair_created_at_utc"], "2026-06-05T11:55:00Z")
             self.assertIsNotNone(entry.get("market_score"))
+
+    def test_ranker_blocks_social_when_token_age_is_old(self):
+        current_time = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+        fresh_pair_created_at = int(datetime(2026, 6, 5, 11, 55, 0, tzinfo=timezone.utc).timestamp() * 1000)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            watchlist_file = root / "watchlist.json"
+            state_file = root / "state.json"
+            market_dir = root / "market_ranker"
+            lock_file = root / "watchlist.lock"
+            token_address = "0x1111111111111111111111111111111111111111"
+            pool_address = "0x2222222222222222222222222222222222222222"
+            watchlist_key = f"ethereum:{token_address}"
+            watchlist_file.write_text(
+                json.dumps(
+                    {
+                        watchlist_key: {
+                            "watchlist_key": watchlist_key,
+                            "chain": "ethereum",
+                            "chain_id": "ethereum",
+                            "token_address": token_address,
+                            "pool_address": pool_address,
+                            "status": "novo",
+                            "social_status": "pendente",
+                            "monitor_status": "pendente",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            pairs = [
+                {
+                    "chainId": "ethereum",
+                    "dexId": "uniswap",
+                    "pairAddress": pool_address,
+                    "baseToken": {"address": token_address, "symbol": "TEST"},
+                    "quoteToken": {"address": "0x0000000000000000000000000000000000000000", "symbol": "ETH"},
+                    "pairCreatedAt": fresh_pair_created_at,
+                    "liquidity": {"usd": 5000},
+                    "volume": {"h24": 1000},
+                    "txns": {"h24": {"buys": 5, "sells": 5}},
+                },
+            ]
+
+            with patch.object(market_ranker, "WATCHLIST_FILE", watchlist_file), patch.object(
+                market_ranker, "WATCHLIST_LOCK_FILE", lock_file
+            ), patch.object(market_ranker, "STATE_FILE", state_file), patch.object(
+                market_ranker, "MARKET_RANKER_DATA_DIR", market_dir
+            ), patch.object(
+                market_ranker, "DATA_DIR", root
+            ), patch.object(
+                market_ranker, "utc_now", return_value=current_time
+            ), patch.object(
+                market_ranker.token_age_resolver,
+                "resolve_token_ages",
+                return_value=(
+                    {
+                        watchlist_key: {
+                            "token_age_status": "resolved",
+                            "token_age_minutes": 1500,
+                            "token_created_at_utc": "2026-06-04T11:00:00Z",
+                        }
+                    },
+                    {"enabled": True, "checked": 1, "resolved": 1, "errors": 0},
+                ),
+            ):
+                market_ranker.run_cycle(
+                    dry_run=False,
+                    session=FakeDexscreenerSession(pairs),
+                )
+
+            updated = json.loads(watchlist_file.read_text(encoding="utf-8"))
+            entry = updated[watchlist_key]
+            self.assertEqual(entry["social_eligibility"], "blocked_old_token")
+            self.assertEqual(entry["social_eligibility_reason"], "old_token")
 
     def test_social_inference_skips_blocked_old_market_without_querying_x(self):
         with tempfile.TemporaryDirectory() as temp_dir:

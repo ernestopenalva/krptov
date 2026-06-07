@@ -110,6 +110,8 @@ def normalize_entry(key, entry):
         "volume_h24": numeric_or_none(entry.get("volume_h24")),
         "txns_h24": numeric_or_none(entry.get("txns_h24")),
         "oldest_pair_age_minutes": numeric_or_none(entry.get("oldest_pair_age_minutes")),
+        "token_age_minutes": numeric_or_none(entry.get("token_age_minutes")),
+        "token_age_status": entry.get("token_age_status") or "missing",
         "times_seen": int(entry.get("times_seen") or 0),
         "last_seen_at_utc": entry.get("last_seen_at_utc") or entry.get("created_at_utc") or "",
         "token_address": entry.get("token_address") or key.split(":", 1)[-1],
@@ -186,7 +188,7 @@ def table_rows(entries, previous_positions, top):
                 "source": entry["source"],
                 "quote": entry["quote_token"],
                 "elig": entry["social_eligibility"],
-                "age": format_age(entry["oldest_pair_age_minutes"]),
+                "token_age": format_age(entry["token_age_minutes"]),
                 "liq": format_money(entry["liquidity_usd"]),
                 "vol": format_money(entry["volume_h24"]),
                 "txns": format_compact_number(entry["txns_h24"]),
@@ -207,7 +209,7 @@ def print_table(rows):
         ("source", "Source", 18),
         ("quote", "Quote", 7),
         ("elig", "Elig", 18),
-        ("age", "AgeDS", 7),
+        ("token_age", "TokenAge", 8),
         ("liq", "Liq", 8),
         ("vol", "Vol24h", 8),
         ("txns", "Tx24h", 7),
@@ -237,6 +239,7 @@ def print_summary(watchlist, entries, args, previous_positions):
     print(f"Candidatos social: {len(social_candidates)}")
     print(f"Por chain: {dict(Counter(entry['chain'] for entry in all_entries))}")
     print(f"Social eligibility: {dict(Counter(entry['social_eligibility'] for entry in all_entries))}")
+    print(f"Token age: {dict(Counter(entry['token_age_status'] for entry in all_entries))}")
     if args.chain:
         print(f"Filtro chain: {args.chain}")
     if args.source:
