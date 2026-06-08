@@ -94,6 +94,43 @@ def display_name(entry):
     return short_address(entry["token_address"])
 
 
+def short_sanity(value):
+    mapping = {
+        "ok": "ok",
+        "misleading_liquidity": "mis",
+        "-": "-",
+    }
+    return mapping.get(value, str(value or "-"))
+
+
+def compact_chain(value):
+    return {"ethereum": "eth", "base": "base"}.get(value, str(value or "-"))
+
+
+def compact_source(value):
+    mapping = {
+        "uniswap_v2": "uni_v2",
+        "uniswap_v3": "uni_v3",
+        "uniswap_v4": "uni_v4",
+        "sushiswap_v2": "sushi",
+        "aerodrome": "aero",
+        "aerodrome_slipstream": "aero_s",
+    }
+    return mapping.get(value, str(value or "-"))
+
+
+def compact_eligibility(value):
+    mapping = {
+        "eligible": "elig",
+        "pending": "pend",
+        "pending_token_age": "p_age",
+        "blocked_old_market": "old_m",
+        "blocked_old_token": "old_t",
+        "missing": "miss",
+    }
+    return mapping.get(value, str(value or "-"))
+
+
 def normalize_entry(key, entry):
     if not isinstance(entry, dict):
         return None
@@ -186,18 +223,16 @@ def table_rows(entries, previous_positions, top):
                 "pos": str(index),
                 "move": movement_marker(entry["watchlist_key"], index, previous_positions),
                 "score": format_score(entry["market_score"]),
-                "chain": entry["chain"],
-                "source": entry["source"],
+                "chain": compact_chain(entry["chain"]),
+                "source": compact_source(entry["source"]),
                 "quote": entry["quote_token"],
-                "elig": entry["social_eligibility"],
+                "elig": compact_eligibility(entry["social_eligibility"]),
                 "token_age": format_age(entry["token_age_minutes"]),
                 "liq": format_money(entry["liquidity_usd"]),
                 "quote_liq": format_money(entry["quote_liquidity_usd"]),
                 "vol": format_money(entry["volume_h24"]),
                 "txns": format_compact_number(entry["txns_h24"]),
-                "seen": str(entry["times_seen"]),
-                "sanity": entry["market_sanity_status"],
-                "ca": short_address(entry["token_address"]),
+                "sanity": short_sanity(entry["market_sanity_status"]),
                 "name": display_name(entry),
             }
         )
@@ -207,22 +242,20 @@ def table_rows(entries, previous_positions, top):
 
 def print_table(rows):
     columns = [
-        ("pos", "#", 4),
-        ("move", "Mov", 8),
-        ("score", "Score", 7),
-        ("chain", "Chain", 9),
-        ("source", "Source", 18),
-        ("quote", "Quote", 7),
-        ("elig", "Elig", 18),
-        ("token_age", "TokenAge", 8),
-        ("liq", "LiqDS", 8),
-        ("quote_liq", "QuoteLiq", 8),
-        ("vol", "Vol24h", 8),
-        ("txns", "Tx24h", 7),
-        ("seen", "Seen", 5),
-        ("sanity", "Sanity", 12),
-        ("ca", "CA", 13),
-        ("name", "Nome", 18),
+        ("pos", "#", 3),
+        ("move", "Mov", 3),
+        ("score", "Score", 5),
+        ("chain", "Chn", 3),
+        ("source", "Src", 5),
+        ("quote", "Qte", 4),
+        ("elig", "Elig", 5),
+        ("token_age", "Age", 4),
+        ("liq", "LiqDS", 6),
+        ("quote_liq", "QLiq", 6),
+        ("vol", "Vol", 6),
+        ("txns", "Tx24h", 5),
+        ("sanity", "San", 3),
+        ("name", "Nome", 8),
     ]
     header = " ".join(title.ljust(width) for _, title, width in columns)
     print(header)

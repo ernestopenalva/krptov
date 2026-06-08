@@ -61,7 +61,6 @@ class WatchlistRankingTests(unittest.TestCase):
         self.assertEqual(rows[0]["vol"], "$3.4K")
         self.assertEqual(rows[0]["txns"], "12")
         self.assertEqual(rows[0]["sanity"], "ok")
-        self.assertEqual(rows[0]["ca"], "0x1111...1111")
 
     def test_eligible_only_filters_social_candidates(self):
         watchlist = {
