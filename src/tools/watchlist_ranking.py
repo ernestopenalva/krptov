@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shutil
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -55,6 +56,8 @@ def format_age(minutes):
     number = numeric_or_none(minutes)
     if number is None:
         return "-"
+    if number >= 1440:
+        return f"{number / 1440:.1f}d"
     if number < 60:
         return f"{number:.0f}m"
     return f"{number / 60:.1f}h"
@@ -233,6 +236,7 @@ def table_rows(entries, previous_positions, top):
                 "vol": format_money(entry["volume_h24"]),
                 "txns": format_compact_number(entry["txns_h24"]),
                 "sanity": short_sanity(entry["market_sanity_status"]),
+                "ca": entry["token_address"],
                 "name": display_name(entry),
             }
         )
@@ -240,8 +244,32 @@ def table_rows(entries, previous_positions, top):
     return rows
 
 
-def print_table(rows):
-    columns = [
+def terminal_width():
+    return shutil.get_terminal_size((120, 20)).columns
+
+
+def table_columns(width=None):
+    width = width or terminal_width()
+    if width >= 145:
+        return [
+            ("pos", "#", 3),
+            ("move", "Mov", 4),
+            ("score", "Score", 6),
+            ("chain", "Chn", 3),
+            ("source", "Src", 6),
+            ("quote", "Qte", 5),
+            ("elig", "Elig", 5),
+            ("token_age", "Age", 5),
+            ("liq", "LiqDS", 8),
+            ("quote_liq", "QLiq", 8),
+            ("vol", "Vol", 8),
+            ("txns", "Tx24h", 6),
+            ("sanity", "San", 3),
+            ("ca", "CA", 42),
+            ("name", "Nome", 18),
+        ]
+
+    return [
         ("pos", "#", 3),
         ("move", "Mov", 3),
         ("score", "Score", 5),
@@ -257,6 +285,10 @@ def print_table(rows):
         ("sanity", "San", 3),
         ("name", "Nome", 8),
     ]
+
+
+def print_table(rows, width=None):
+    columns = table_columns(width)
     header = " ".join(title.ljust(width) for _, title, width in columns)
     print(header)
     print("-" * len(header))
