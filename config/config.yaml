@@ -78,6 +78,11 @@ market_ranker:
     max_token_age_minutes: 1440
     max_pool_age_minutes: 1440
 
+  market_sanity:
+    misleading_liquidity_usd_threshold: 100000
+    misleading_quote_liquidity_usd_threshold: 1000
+    misleading_score_multiplier: 0.25
+
   watchlist_retention:
     enabled: true
     max_entries: 500

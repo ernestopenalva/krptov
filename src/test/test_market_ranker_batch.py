@@ -152,6 +152,41 @@ class MarketRankerBatchTests(unittest.TestCase):
             self.assertEqual(updated[key_a]["volume_h24"], 1000)
             self.assertEqual(updated[key_a]["txns_h24"], 20)
 
+    def test_market_score_uses_quote_liquidity_and_marks_misleading_liquidity(self):
+        current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
+        token_address = "0x1111111111111111111111111111111111111111"
+        entry = token_entry(token_address, f"ethereum:{token_address}")
+        pair = {
+            "chainId": "ethereum",
+            "dexId": "uniswap",
+            "pairAddress": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "baseToken": {"address": token_address, "symbol": "ZEC", "name": "Zcash"},
+            "quoteToken": {
+                "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                "symbol": "WETH",
+                "name": "Wrapped Ether",
+            },
+            "priceNative": "0.2085",
+            "priceUsd": "324.032",
+            "pairCreatedAt": int(datetime(2026, 6, 6, 11, 56, 0, tzinfo=timezone.utc).timestamp() * 1000),
+            "liquidity": {"usd": 3_402_339_417.01, "base": 10_499_999, "quote": 0.0004143},
+            "volume": {"h24": 730.27},
+            "txns": {"h24": {"buys": 6, "sells": 3}},
+        }
+
+        score, components, metrics = market_ranker.calculate_market_score(
+            pair,
+            entry,
+            current_time,
+            weights={"liquidity": 5, "volume_h24": 4, "txns_h24": 3, "age": 5},
+        )
+
+        self.assertEqual(metrics["market_sanity_status"], "misleading_liquidity")
+        self.assertEqual(metrics["quote_liquidity_symbol"], "WETH")
+        self.assertLess(metrics["quote_liquidity_usd"], 1)
+        self.assertEqual(components["liquidity"], 10)
+        self.assertLess(score, 15)
+
     def test_watchlist_retention_applies_blind_cap_without_removing_protected(self):
         current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
 

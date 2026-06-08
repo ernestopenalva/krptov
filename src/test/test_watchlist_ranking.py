@@ -27,8 +27,10 @@ class WatchlistRankingTests(unittest.TestCase):
                 "social_eligibility": "eligible",
                 "market_score": 10,
                 "liquidity_usd": 1200,
+                "quote_liquidity_usd": 900,
                 "volume_h24": 3400,
                 "txns_h24": 12,
+                "market_sanity_status": "ok",
             },
             "base:0x2222222222222222222222222222222222222222": {
                 "chain": "base",
@@ -55,8 +57,11 @@ class WatchlistRankingTests(unittest.TestCase):
         self.assertEqual(watchlist_ranking.display_name(ranked[1]), "AAA/Alpha")
         rows = watchlist_ranking.table_rows([ranked[1]], {}, top=1)
         self.assertEqual(rows[0]["liq"], "$1.2K")
+        self.assertEqual(rows[0]["quote_liq"], "$900")
         self.assertEqual(rows[0]["vol"], "$3.4K")
         self.assertEqual(rows[0]["txns"], "12")
+        self.assertEqual(rows[0]["sanity"], "ok")
+        self.assertEqual(rows[0]["ca"], "0x1111...1111")
 
     def test_eligible_only_filters_social_candidates(self):
         watchlist = {

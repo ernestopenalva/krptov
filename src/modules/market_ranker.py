@@ -42,6 +42,25 @@ SOCIAL_ELIGIBILITY_REASON_FRESH_MARKET = "fresh_market"
 SOCIAL_ELIGIBILITY_REASON_OLD_MARKET = "old_market"
 SOCIAL_ELIGIBILITY_REASON_OLD_TOKEN = "old_token"
 SOCIAL_ELIGIBILITY_MAX_MARKET_AGE_HOURS = 24
+MARKET_SANITY_OK = "ok"
+MARKET_SANITY_MISLEADING_LIQUIDITY = "misleading_liquidity"
+MARKET_SANITY_REASON_MISLEADING_LIQUIDITY = "high_dex_liquidity_low_quote_liquidity"
+TRUSTED_QUOTE_SYMBOLS = {
+    "ETH",
+    "WETH",
+    "USDC",
+    "USDT",
+    "USDBC",
+    "DAI",
+}
+STABLE_QUOTE_SYMBOLS = {
+    "USDC",
+    "USDT",
+    "USDBC",
+    "DAI",
+}
+MISLEADING_LIQUIDITY_USD_THRESHOLD = 100_000
+MISLEADING_QUOTE_LIQUIDITY_USD_THRESHOLD = 1_000
 
 DEFAULT_CONFIG = {
     "market_ranker": {
@@ -71,6 +90,11 @@ DEFAULT_CONFIG = {
         "social_eligibility": {
             "max_token_age_minutes": 1440,
             "max_pool_age_minutes": 1440,
+        },
+        "market_sanity": {
+            "misleading_liquidity_usd_threshold": 100_000,
+            "misleading_quote_liquidity_usd_threshold": 1_000,
+            "misleading_score_multiplier": 0.25,
         },
     },
     "ops_alerts": {
@@ -224,6 +248,12 @@ def token_age_config(config):
 def social_eligibility_config(config):
     configured = market_ranker_config(config).get("social_eligibility") or {}
     defaults = DEFAULT_CONFIG["market_ranker"]["social_eligibility"]
+    return merge_dict(defaults, configured)
+
+
+def market_sanity_config(config):
+    configured = market_ranker_config(config).get("market_sanity") or {}
+    defaults = DEFAULT_CONFIG["market_ranker"]["market_sanity"]
     return merge_dict(defaults, configured)
 
 
@@ -639,6 +669,101 @@ def liquidity_usd(pair):
     return nested_number(pair, ["liquidity", "usd"])
 
 
+def token_side_in_pair(pair, token_address):
+    normalized_token = normalize_evm_address(token_address)
+    if not normalized_token or not isinstance(pair, dict):
+        return None
+
+    for side, key in (("base", "baseToken"), ("quote", "quoteToken")):
+        token = pair.get(key)
+        if not isinstance(token, dict):
+            continue
+        if normalize_evm_address(token.get("address")) == normalized_token:
+            return side
+
+    return None
+
+
+def quote_symbol_for_side(pair, side):
+    key = "baseToken" if side == "base" else "quoteToken"
+    token = pair.get(key) if isinstance(pair, dict) else None
+    if not isinstance(token, dict):
+        return None
+    symbol = token.get("symbol")
+    if not symbol:
+        return None
+    return str(symbol).upper()
+
+
+def trusted_quote_side(pair):
+    for side in ("quote", "base"):
+        symbol = quote_symbol_for_side(pair, side)
+        if symbol and symbol in TRUSTED_QUOTE_SYMBOLS:
+            return side
+    return None
+
+
+def quote_token_usd_price(pair, side):
+    symbol = quote_symbol_for_side(pair, side)
+    if not symbol:
+        return None
+    if symbol in STABLE_QUOTE_SYMBOLS:
+        return 1.0
+
+    price_usd = nested_number(pair, ["priceUsd"], None)
+    if side == "base":
+        return price_usd
+
+    price_native = nested_number(pair, ["priceNative"], None)
+    if price_usd is None or price_native is None or price_native <= 0:
+        return None
+    return price_usd / price_native
+
+
+def quote_liquidity_metrics(pair, token_address, config=None):
+    config = config or DEFAULT_CONFIG["market_ranker"]["market_sanity"]
+    base_amount = nested_number(pair, ["liquidity", "base"], None)
+    quote_amount = nested_number(pair, ["liquidity", "quote"], None)
+    side = trusted_quote_side(pair)
+    trusted_amount = None
+    quote_liquidity_usd = None
+    quote_symbol = quote_symbol_for_side(pair, side) if side else None
+
+    if side == "base":
+        trusted_amount = base_amount
+    elif side == "quote":
+        trusted_amount = quote_amount
+
+    trusted_price = quote_token_usd_price(pair, side) if side else None
+    if trusted_amount is not None and trusted_price is not None:
+        quote_liquidity_usd = trusted_amount * trusted_price
+
+    dex_liquidity = liquidity_usd(pair)
+    misleading = (
+        dex_liquidity > float(config.get("misleading_liquidity_usd_threshold") or MISLEADING_LIQUIDITY_USD_THRESHOLD)
+        and quote_liquidity_usd is not None
+        and quote_liquidity_usd < float(
+            config.get("misleading_quote_liquidity_usd_threshold")
+            or MISLEADING_QUOTE_LIQUIDITY_USD_THRESHOLD
+        )
+    )
+    status = MARKET_SANITY_MISLEADING_LIQUIDITY if misleading else MARKET_SANITY_OK
+    reason = MARKET_SANITY_REASON_MISLEADING_LIQUIDITY if misleading else None
+
+    return {
+        "liquidity_usd": dex_liquidity,
+        "base_liquidity_amount": base_amount,
+        "quote_liquidity_amount": quote_amount,
+        "quote_liquidity_side": side,
+        "quote_liquidity_symbol": quote_symbol,
+        "quote_liquidity_usd": round(quote_liquidity_usd, 2) if quote_liquidity_usd is not None else None,
+        "token_pair_side": token_side_in_pair(pair, token_address),
+        "market_sanity_status": status,
+        "market_sanity_reason": reason,
+        "misleading_liquidity": misleading,
+    }
+
+
 def select_best_pair(pairs, entry):
     if not pairs:
         return None, "not_found"
@@ -817,8 +942,9 @@ def token_start_time(entry):
     return parse_iso(entry.get("created_at_utc")) or parse_iso(entry.get("discovered_at_utc"))
 
 
-def calculate_market_score(pair, entry, current_time, weights=None):
+def calculate_market_score(pair, entry, current_time, weights=None, sanity_config=None):
     weights = weights or DEFAULT_CONFIG["market_ranker"]["score_weights"]
+    sanity_config = sanity_config or DEFAULT_CONFIG["market_ranker"]["market_sanity"]
     total_weight = sum(float(value) for value in weights.values())
     if total_weight <= 0:
         weights = DEFAULT_CONFIG["market_ranker"]["score_weights"]
@@ -829,7 +955,10 @@ def calculate_market_score(pair, entry, current_time, weights=None):
     if start_time:
         age_minutes = max(0, (current_time - start_time).total_seconds() / 60)
 
-    liquidity = liquidity_usd(pair)
+    quote_metrics = quote_liquidity_metrics(pair, entry.get("token_address"), config=sanity_config)
+    liquidity = quote_metrics.get("quote_liquidity_usd")
+    if liquidity is None:
+        liquidity = quote_metrics["liquidity_usd"]
     volume = nested_number(pair, ["volume", "h24"])
     txns = h24_txns(pair)
 
@@ -846,8 +975,11 @@ def calculate_market_score(pair, entry, current_time, weights=None):
         + components["age"] * weights["age"]
     ) / total_weight
 
+    if quote_metrics["misleading_liquidity"]:
+        score *= float(sanity_config.get("misleading_score_multiplier") or 0.25)
+
     return round(score, 2), components, {
-        "liquidity_usd": liquidity,
+        **quote_metrics,
         "volume_h24": volume,
         "txns_h24": txns,
         "age_minutes": round(age_minutes, 2) if age_minutes is not None else None,
@@ -1238,6 +1370,7 @@ def run_cycle(dry_run=False, session=requests):
     config = load_config()
     weights = score_weights(config)
     eligibility_config = social_eligibility_config(config)
+    sanity_config = market_sanity_config(config)
     current_time = utc_now()
     now_text = to_iso(current_time)
     watchlist = load_watchlist()
@@ -1303,6 +1436,7 @@ def run_cycle(dry_run=False, session=requests):
                     token["entry"],
                     current_time,
                     weights=weights,
+                    sanity_config=sanity_config,
                 )
                 dex_found += 1
             else:

@@ -107,8 +107,10 @@ def normalize_entry(key, entry):
         "social_eligibility": entry.get("social_eligibility") or "missing",
         "market_score": numeric_or_none(entry.get("market_score")),
         "liquidity_usd": numeric_or_none(entry.get("liquidity_usd")),
+        "quote_liquidity_usd": numeric_or_none(entry.get("quote_liquidity_usd")),
         "volume_h24": numeric_or_none(entry.get("volume_h24")),
         "txns_h24": numeric_or_none(entry.get("txns_h24")),
+        "market_sanity_status": entry.get("market_sanity_status") or "-",
         "oldest_pair_age_minutes": numeric_or_none(entry.get("oldest_pair_age_minutes")),
         "token_age_minutes": numeric_or_none(entry.get("token_age_minutes")),
         "token_age_status": entry.get("token_age_status") or "missing",
@@ -190,9 +192,12 @@ def table_rows(entries, previous_positions, top):
                 "elig": entry["social_eligibility"],
                 "token_age": format_age(entry["token_age_minutes"]),
                 "liq": format_money(entry["liquidity_usd"]),
+                "quote_liq": format_money(entry["quote_liquidity_usd"]),
                 "vol": format_money(entry["volume_h24"]),
                 "txns": format_compact_number(entry["txns_h24"]),
                 "seen": str(entry["times_seen"]),
+                "sanity": entry["market_sanity_status"],
+                "ca": short_address(entry["token_address"]),
                 "name": display_name(entry),
             }
         )
@@ -210,11 +215,14 @@ def print_table(rows):
         ("quote", "Quote", 7),
         ("elig", "Elig", 18),
         ("token_age", "TokenAge", 8),
-        ("liq", "Liq", 8),
+        ("liq", "LiqDS", 8),
+        ("quote_liq", "QuoteLiq", 8),
         ("vol", "Vol24h", 8),
         ("txns", "Tx24h", 7),
         ("seen", "Seen", 5),
-        ("name", "Nome", 22),
+        ("sanity", "Sanity", 12),
+        ("ca", "CA", 13),
+        ("name", "Nome", 18),
     ]
     header = " ".join(title.ljust(width) for _, title, width in columns)
     print(header)
@@ -240,6 +248,7 @@ def print_summary(watchlist, entries, args, previous_positions):
     print(f"Por chain: {dict(Counter(entry['chain'] for entry in all_entries))}")
     print(f"Social eligibility: {dict(Counter(entry['social_eligibility'] for entry in all_entries))}")
     print(f"Token age: {dict(Counter(entry['token_age_status'] for entry in all_entries))}")
+    print(f"Market sanity: {dict(Counter(entry['market_sanity_status'] for entry in all_entries))}")
     if args.chain:
         print(f"Filtro chain: {args.chain}")
     if args.source:
