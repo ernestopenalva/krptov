@@ -126,10 +126,16 @@ def compact_eligibility(value):
     mapping = {
         "eligible": "elig",
         "pending": "pend",
-        "pending_token_age": "p_age",
         "blocked_old_market": "old_m",
-        "blocked_old_token": "old_t",
         "missing": "miss",
+    }
+    return mapping.get(value, str(value or "-"))
+
+
+def compact_age_source(value):
+    mapping = {
+        "oldest_pair": "old",
+        "selected_pair": "sel",
     }
     return mapping.get(value, str(value or "-"))
 
@@ -152,8 +158,8 @@ def normalize_entry(key, entry):
         "txns_h24": numeric_or_none(entry.get("txns_h24")),
         "market_sanity_status": entry.get("market_sanity_status") or "-",
         "oldest_pair_age_minutes": numeric_or_none(entry.get("oldest_pair_age_minutes")),
-        "token_age_minutes": numeric_or_none(entry.get("token_age_minutes")),
-        "token_age_status": entry.get("token_age_status") or "missing",
+        "minimum_token_age_inferred_minutes": numeric_or_none(entry.get("minimum_token_age_inferred_minutes")),
+        "minimum_token_age_inferred_source": entry.get("minimum_token_age_inferred_source") or "-",
         "times_seen": int(entry.get("times_seen") or 0),
         "last_seen_at_utc": entry.get("last_seen_at_utc") or entry.get("created_at_utc") or "",
         "token_address": entry.get("token_address") or key.split(":", 1)[-1],
@@ -230,7 +236,8 @@ def table_rows(entries, previous_positions, top):
                 "source": compact_source(entry["source"]),
                 "quote": entry["quote_token"],
                 "elig": compact_eligibility(entry["social_eligibility"]),
-                "token_age": format_age(entry["token_age_minutes"]),
+                "minimum_age": format_age(entry["minimum_token_age_inferred_minutes"]),
+                "age_source": compact_age_source(entry["minimum_token_age_inferred_source"]),
                 "liq": format_money(entry["liquidity_usd"]),
                 "quote_liq": format_money(entry["quote_liquidity_usd"]),
                 "vol": format_money(entry["volume_h24"]),
@@ -259,7 +266,8 @@ def table_columns(width=None):
             ("source", "Src", 6),
             ("quote", "Qte", 5),
             ("elig", "Elig", 5),
-            ("token_age", "Age", 5),
+            ("minimum_age", "MinAg", 5),
+            ("age_source", "SrcA", 4),
             ("liq", "LiqDS", 8),
             ("quote_liq", "QLiq", 8),
             ("vol", "Vol", 8),
@@ -277,7 +285,8 @@ def table_columns(width=None):
         ("source", "Src", 5),
         ("quote", "Qte", 4),
         ("elig", "Elig", 5),
-        ("token_age", "Age", 4),
+        ("minimum_age", "MinA", 4),
+        ("age_source", "ASrc", 4),
         ("liq", "LiqDS", 6),
         ("quote_liq", "QLiq", 6),
         ("vol", "Vol", 6),
@@ -312,7 +321,7 @@ def print_summary(watchlist, entries, args, previous_positions):
     print(f"Candidatos social: {len(social_candidates)}")
     print(f"Por chain: {dict(Counter(entry['chain'] for entry in all_entries))}")
     print(f"Social eligibility: {dict(Counter(entry['social_eligibility'] for entry in all_entries))}")
-    print(f"Token age: {dict(Counter(entry['token_age_status'] for entry in all_entries))}")
+    print(f"Minimum age source: {dict(Counter(entry['minimum_token_age_inferred_source'] for entry in all_entries))}")
     print(f"Market sanity: {dict(Counter(entry['market_sanity_status'] for entry in all_entries))}")
     if args.chain:
         print(f"Filtro chain: {args.chain}")

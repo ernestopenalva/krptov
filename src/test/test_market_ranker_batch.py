@@ -118,24 +118,6 @@ class MarketRankerBatchTests(unittest.TestCase):
                 market_ranker, "utc_now", return_value=current_time
             ), patch.object(
                 market_ranker, "maybe_send_ops_alert", return_value=None
-            ), patch.object(
-                market_ranker.token_age_resolver,
-                "resolve_token_ages",
-                return_value=(
-                    {
-                        key_a: {
-                            "token_age_status": "resolved",
-                            "token_age_minutes": 5,
-                            "token_created_at_utc": "2026-06-06T11:55:00Z",
-                        },
-                        key_b: {
-                            "token_age_status": "resolved",
-                            "token_age_minutes": 5,
-                            "token_created_at_utc": "2026-06-06T11:55:00Z",
-                        },
-                    },
-                    {"enabled": True, "checked": 2, "resolved": 2, "errors": 0},
-                ),
             ):
                 summary = market_ranker.run_cycle(dry_run=False, session=session)
 
@@ -151,6 +133,8 @@ class MarketRankerBatchTests(unittest.TestCase):
             self.assertEqual(updated[key_a]["liquidity_usd"], 5000)
             self.assertEqual(updated[key_a]["volume_h24"], 1000)
             self.assertEqual(updated[key_a]["txns_h24"], 20)
+            self.assertEqual(updated[key_a]["minimum_token_age_inferred_minutes"], 4)
+            self.assertEqual(updated[key_a]["minimum_token_age_inferred_source"], "oldest_pair")
 
     def test_market_score_uses_quote_liquidity_and_marks_misleading_liquidity(self):
         current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
@@ -178,13 +162,17 @@ class MarketRankerBatchTests(unittest.TestCase):
             pair,
             entry,
             current_time,
-            weights={"liquidity": 5, "volume_h24": 4, "txns_h24": 3, "age": 5},
+            weights={"quote_liquidity": 5, "volume_h24": 3, "txns_h24": 4, "minimum_token_age_inferred": 5},
+            inferred_age={
+                "minimum_token_age_inferred_minutes": 4,
+                "minimum_token_age_inferred_source": "oldest_pair",
+            },
         )
 
         self.assertEqual(metrics["market_sanity_status"], "misleading_liquidity")
         self.assertEqual(metrics["quote_liquidity_symbol"], "WETH")
         self.assertLess(metrics["quote_liquidity_usd"], 1)
-        self.assertEqual(components["liquidity"], 10)
+        self.assertEqual(components["quote_liquidity"], 10)
         self.assertLess(score, 15)
 
     def test_watchlist_retention_applies_blind_cap_without_removing_protected(self):

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import requests
 
-from src.modules import telegram_notifier, token_age_resolver
+from src.modules import telegram_notifier
 
 
 MARKET_RANKER_VERSION = "krptov-market-ranker-v1-2026-06-03"
@@ -34,14 +34,12 @@ STATUS_ATIVO = "ativo"
 SOCIAL_ELIGIBILITY_PENDING = "pending"
 SOCIAL_ELIGIBILITY_ELIGIBLE = "eligible"
 SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET = "blocked_old_market"
-SOCIAL_ELIGIBILITY_PENDING_TOKEN_AGE = "pending_token_age"
-SOCIAL_ELIGIBILITY_BLOCKED_OLD_TOKEN = "blocked_old_token"
 SOCIAL_ELIGIBILITY_REASON_PENDING_DEX = "pending_dexscreener"
-SOCIAL_ELIGIBILITY_REASON_PENDING_TOKEN_AGE = "pending_token_age"
 SOCIAL_ELIGIBILITY_REASON_FRESH_MARKET = "fresh_market"
 SOCIAL_ELIGIBILITY_REASON_OLD_MARKET = "old_market"
-SOCIAL_ELIGIBILITY_REASON_OLD_TOKEN = "old_token"
 SOCIAL_ELIGIBILITY_MAX_MARKET_AGE_HOURS = 24
+MINIMUM_TOKEN_AGE_SOURCE_OLDEST_PAIR = "oldest_pair"
+MINIMUM_TOKEN_AGE_SOURCE_SELECTED_PAIR = "selected_pair"
 MARKET_SANITY_OK = "ok"
 MARKET_SANITY_MISLEADING_LIQUIDITY = "misleading_liquidity"
 MARKET_SANITY_REASON_MISLEADING_LIQUIDITY = "high_dex_liquidity_low_quote_liquidity"
@@ -61,14 +59,21 @@ STABLE_QUOTE_SYMBOLS = {
 }
 MISLEADING_LIQUIDITY_USD_THRESHOLD = 100_000
 MISLEADING_QUOTE_LIQUIDITY_USD_THRESHOLD = 1_000
+DEPRECATED_WATCHLIST_FIELDS = {
+    "token_created_at_utc",
+    "token_age_minutes",
+    "token_age_status",
+    "token_age_source",
+    "token_age_updated_at",
+}
 
 DEFAULT_CONFIG = {
     "market_ranker": {
         "score_weights": {
-            "liquidity": 5,
-            "volume_h24": 4,
-            "txns_h24": 3,
-            "age": 5,
+            "quote_liquidity": 5,
+            "volume_h24": 3,
+            "txns_h24": 4,
+            "minimum_token_age_inferred": 5,
         },
         "watchlist_retention": {
             "enabled": True,
@@ -81,14 +86,7 @@ DEFAULT_CONFIG = {
             "low_score_retention_hours": 24,
             "low_score_threshold": 35,
         },
-        "token_age": {
-            "enabled": True,
-            "api_key_env": "ETHERSCAN_API_KEY",
-            "refresh_hours": 6,
-            "sleep_seconds": 0.2,
-        },
         "social_eligibility": {
-            "max_token_age_minutes": 1440,
             "max_pool_age_minutes": 1440,
         },
         "market_sanity": {
@@ -237,12 +235,6 @@ def score_weights(config):
         return defaults.copy()
 
     return weights
-
-
-def token_age_config(config):
-    configured = market_ranker_config(config).get("token_age") or {}
-    defaults = DEFAULT_CONFIG["market_ranker"]["token_age"]
-    return merge_dict(defaults, configured)
 
 
 def social_eligibility_config(config):
@@ -810,79 +802,66 @@ def select_oldest_pair(pairs):
     return min(dated_pairs, key=lambda item: item[0])[1]
 
 
-def calculate_social_eligibility(pairs, selected_pair, token_entry, current_time, config=None):
+def minimum_token_age_inferred(pairs, selected_pair, current_time):
+    oldest_pair = select_oldest_pair(pairs)
+    oldest_created_at = pair_created_at_datetime(oldest_pair)
+    selected_created_at = pair_created_at_datetime(selected_pair)
+
+    source = None
+    inferred_at = None
+    if oldest_created_at:
+        inferred_at = oldest_created_at
+        source = MINIMUM_TOKEN_AGE_SOURCE_OLDEST_PAIR
+    elif selected_created_at:
+        inferred_at = selected_created_at
+        source = MINIMUM_TOKEN_AGE_SOURCE_SELECTED_PAIR
+
+    age_minutes = None
+    if inferred_at:
+        age_minutes = max(0, (current_time - inferred_at).total_seconds() / 60)
+
+    return {
+        "oldest_pair_created_at_utc": to_iso(oldest_created_at) if oldest_created_at else None,
+        "oldest_pair_age_minutes": round(max(0, (current_time - oldest_created_at).total_seconds() / 60), 2)
+        if oldest_created_at else None,
+        "selected_pair_created_at_utc": to_iso(selected_created_at) if selected_created_at else None,
+        "minimum_token_age_inferred_minutes": round(age_minutes, 2) if age_minutes is not None else None,
+        "minimum_token_age_inferred_source": source,
+    }
+
+
+def calculate_social_eligibility(selected_pair, inferred_age, current_time, config=None):
     config = config or DEFAULT_CONFIG["market_ranker"]["social_eligibility"]
     if not selected_pair:
         return {
             "social_eligibility": SOCIAL_ELIGIBILITY_PENDING,
             "social_eligibility_reason": SOCIAL_ELIGIBILITY_REASON_PENDING_DEX,
-            "oldest_pair_created_at_utc": None,
-            "oldest_pair_age_minutes": None,
-            "selected_pair_created_at_utc": None,
+            **inferred_age,
         }
 
-    oldest_pair = select_oldest_pair(pairs)
-    oldest_created_at = pair_created_at_datetime(oldest_pair)
-    selected_created_at = pair_created_at_datetime(selected_pair)
-
-    if not oldest_created_at:
+    age_minutes = numeric_or_none(inferred_age.get("minimum_token_age_inferred_minutes"))
+    if age_minutes is None:
         return {
             "social_eligibility": SOCIAL_ELIGIBILITY_PENDING,
             "social_eligibility_reason": SOCIAL_ELIGIBILITY_REASON_PENDING_DEX,
-            "oldest_pair_created_at_utc": None,
-            "oldest_pair_age_minutes": None,
-            "selected_pair_created_at_utc": pair_created_at_iso(selected_pair),
+            **inferred_age,
         }
 
-    oldest_age_minutes = max(0, (current_time - oldest_created_at).total_seconds() / 60)
     max_pool_age_minutes = float(
         config.get("max_pool_age_minutes")
         or SOCIAL_ELIGIBILITY_MAX_MARKET_AGE_HOURS * 60
     )
-    if oldest_age_minutes > max_pool_age_minutes:
+    if age_minutes > max_pool_age_minutes:
         return {
             "social_eligibility": SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET,
             "social_eligibility_reason": SOCIAL_ELIGIBILITY_REASON_OLD_MARKET,
-            "oldest_pair_created_at_utc": to_iso(oldest_created_at),
-            "oldest_pair_age_minutes": round(oldest_age_minutes, 2),
-            "selected_pair_created_at_utc": to_iso(selected_created_at) if selected_created_at else None,
-        }
-
-    if token_entry.get("token_age_status") != token_age_resolver.TOKEN_AGE_STATUS_RESOLVED:
-        return {
-            "social_eligibility": SOCIAL_ELIGIBILITY_PENDING_TOKEN_AGE,
-            "social_eligibility_reason": SOCIAL_ELIGIBILITY_REASON_PENDING_TOKEN_AGE,
-            "oldest_pair_created_at_utc": to_iso(oldest_created_at),
-            "oldest_pair_age_minutes": round(oldest_age_minutes, 2),
-            "selected_pair_created_at_utc": to_iso(selected_created_at) if selected_created_at else None,
-        }
-
-    token_age_minutes = numeric_or_none(token_entry.get("token_age_minutes"))
-    max_token_age_minutes = float(config.get("max_token_age_minutes") or 1440)
-    if token_age_minutes is None:
-        return {
-            "social_eligibility": SOCIAL_ELIGIBILITY_PENDING_TOKEN_AGE,
-            "social_eligibility_reason": SOCIAL_ELIGIBILITY_REASON_PENDING_TOKEN_AGE,
-            "oldest_pair_created_at_utc": to_iso(oldest_created_at),
-            "oldest_pair_age_minutes": round(oldest_age_minutes, 2),
-            "selected_pair_created_at_utc": to_iso(selected_created_at) if selected_created_at else None,
-        }
-
-    if token_age_minutes > max_token_age_minutes:
-        return {
-            "social_eligibility": SOCIAL_ELIGIBILITY_BLOCKED_OLD_TOKEN,
-            "social_eligibility_reason": SOCIAL_ELIGIBILITY_REASON_OLD_TOKEN,
-            "oldest_pair_created_at_utc": to_iso(oldest_created_at),
-            "oldest_pair_age_minutes": round(oldest_age_minutes, 2),
-            "selected_pair_created_at_utc": to_iso(selected_created_at) if selected_created_at else None,
+            **inferred_age,
         }
 
     return {
         "social_eligibility": SOCIAL_ELIGIBILITY_ELIGIBLE,
         "social_eligibility_reason": SOCIAL_ELIGIBILITY_REASON_FRESH_MARKET,
-        "oldest_pair_created_at_utc": to_iso(oldest_created_at),
-        "oldest_pair_age_minutes": round(oldest_age_minutes, 2),
-        "selected_pair_created_at_utc": to_iso(selected_created_at) if selected_created_at else None,
+        **inferred_age,
     }
 
 
@@ -942,7 +921,7 @@ def token_start_time(entry):
     return parse_iso(entry.get("created_at_utc")) or parse_iso(entry.get("discovered_at_utc"))
 
 
-def calculate_market_score(pair, entry, current_time, weights=None, sanity_config=None):
+def calculate_market_score(pair, entry, current_time, weights=None, sanity_config=None, inferred_age=None):
     weights = weights or DEFAULT_CONFIG["market_ranker"]["score_weights"]
     sanity_config = sanity_config or DEFAULT_CONFIG["market_ranker"]["market_sanity"]
     total_weight = sum(float(value) for value in weights.values())
@@ -950,29 +929,26 @@ def calculate_market_score(pair, entry, current_time, weights=None, sanity_confi
         weights = DEFAULT_CONFIG["market_ranker"]["score_weights"]
         total_weight = sum(float(value) for value in weights.values())
 
-    start_time = token_start_time(entry)
-    age_minutes = None
-    if start_time:
-        age_minutes = max(0, (current_time - start_time).total_seconds() / 60)
+    age_minutes = numeric_or_none(inferred_age.get("minimum_token_age_inferred_minutes")) if inferred_age else None
 
     quote_metrics = quote_liquidity_metrics(pair, entry.get("token_address"), config=sanity_config)
-    liquidity = quote_metrics.get("quote_liquidity_usd")
-    if liquidity is None:
-        liquidity = quote_metrics["liquidity_usd"]
+    quote_liquidity = quote_metrics.get("quote_liquidity_usd")
+    if quote_liquidity is None:
+        quote_liquidity = quote_metrics["liquidity_usd"]
     volume = nested_number(pair, ["volume", "h24"])
     txns = h24_txns(pair)
 
     components = {
-        "liquidity": component_liquidity(liquidity),
+        "quote_liquidity": component_liquidity(quote_liquidity),
         "volume_h24": component_volume(volume),
         "txns_h24": component_txns(txns),
-        "age": component_age(age_minutes),
+        "minimum_token_age_inferred": component_age(age_minutes),
     }
     score = (
-        components["liquidity"] * weights["liquidity"]
+        components["quote_liquidity"] * weights["quote_liquidity"]
         + components["volume_h24"] * weights["volume_h24"]
         + components["txns_h24"] * weights["txns_h24"]
-        + components["age"] * weights["age"]
+        + components["minimum_token_age_inferred"] * weights["minimum_token_age_inferred"]
     ) / total_weight
 
     if quote_metrics["misleading_liquidity"]:
@@ -982,7 +958,7 @@ def calculate_market_score(pair, entry, current_time, weights=None, sanity_confi
         **quote_metrics,
         "volume_h24": volume,
         "txns_h24": txns,
-        "age_minutes": round(age_minutes, 2) if age_minutes is not None else None,
+        **(inferred_age or {}),
     }
 
 
@@ -1096,6 +1072,8 @@ def update_watchlist_market_fields(updates_by_key):
         for watchlist_key, update in updates_by_key.items():
             entry = watchlist.get(watchlist_key)
             if isinstance(entry, dict):
+                for field in DEPRECATED_WATCHLIST_FIELDS:
+                    entry.pop(field, None)
                 entry.update(update)
         atomic_save_json(WATCHLIST_FILE, watchlist)
 
@@ -1172,13 +1150,8 @@ def retention_reason(entry, config, current_time):
     social_eligibility = entry.get("social_eligibility")
     market_score = numeric_or_none(entry.get("market_score"))
 
-    if social_eligibility in {
-        SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET,
-        SOCIAL_ELIGIBILITY_BLOCKED_OLD_TOKEN,
-    }:
+    if social_eligibility == SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET:
         if age_hours >= config_int(config, "blocked_old_market_retention_hours", 6):
-            if social_eligibility == SOCIAL_ELIGIBILITY_BLOCKED_OLD_TOKEN:
-                return "retention_blocked_old_token"
             return "retention_blocked_old_market"
         return None
 
@@ -1207,9 +1180,7 @@ def blind_cap_sort_key(item):
     eligibility = entry.get("social_eligibility")
     eligibility_rank = {
         SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET: 0,
-        SOCIAL_ELIGIBILITY_BLOCKED_OLD_TOKEN: 0,
         SOCIAL_ELIGIBILITY_PENDING: 1,
-        SOCIAL_ELIGIBILITY_PENDING_TOKEN_AGE: 1,
         None: 2,
         SOCIAL_ELIGIBILITY_ELIGIBLE: 3,
     }.get(eligibility, 2)
@@ -1303,15 +1274,6 @@ def print_summary(summary, results):
     print(f"Encontrados na Dexscreener: {summary['dex_found']}")
     print(f"Nao encontrados: {summary['dex_not_found']}")
     print(f"Erros: {summary['errors']}")
-    token_age = summary.get("token_age") or {}
-    if token_age.get("enabled"):
-        print(
-            "Token age: "
-            f"checados={token_age.get('checked', 0)} | "
-            f"resolvidos={token_age.get('resolved', 0)} | "
-            f"pendentes={token_age.get('unresolved', 0)} | "
-            f"erros={token_age.get('errors', 0)}"
-        )
     retention = summary.get("watchlist_retention") or {}
     if retention.get("enabled"):
         print(
@@ -1376,17 +1338,9 @@ def run_cycle(dry_run=False, session=requests):
     watchlist = load_watchlist()
     state = load_state()
     rankable_tokens = select_rankable_tokens(watchlist)
-    token_age_updates, token_age_summary = token_age_resolver.resolve_token_ages(
-        rankable_tokens,
-        config=token_age_config(config),
-        current_time=current_time,
-    )
 
     results = []
-    updates_by_key = {
-        watchlist_key: update.copy()
-        for watchlist_key, update in token_age_updates.items()
-    }
+    updates_by_key = {}
     dex_found = 0
     dex_not_found = 0
     errors = 0
@@ -1418,17 +1372,7 @@ def run_cycle(dry_run=False, session=requests):
 
             pairs = pairs_by_key.get(token["watchlist_key"], [])
             selected_pair, association_type = select_best_pair(pairs, token["entry"])
-            enriched_entry = {
-                **token["entry"],
-                **token_age_updates.get(token["watchlist_key"], {}),
-            }
-            social_eligibility = calculate_social_eligibility(
-                pairs,
-                selected_pair,
-                enriched_entry,
-                current_time,
-                config=eligibility_config,
-            )
+            inferred_age = minimum_token_age_inferred(pairs, selected_pair, current_time)
             if selected_pair:
                 dex_status = "found"
                 market_score, components, metrics = calculate_market_score(
@@ -1437,19 +1381,30 @@ def run_cycle(dry_run=False, session=requests):
                     current_time,
                     weights=weights,
                     sanity_config=sanity_config,
+                    inferred_age=inferred_age,
                 )
                 dex_found += 1
             else:
                 dex_not_found += 1
+                metrics = inferred_age
+
+            social_eligibility = calculate_social_eligibility(
+                selected_pair,
+                inferred_age,
+                current_time,
+                config=eligibility_config,
+            )
 
             updates_by_key.setdefault(token["watchlist_key"], {}).update(
                 {
-                "social_eligibility": social_eligibility["social_eligibility"],
-                "social_eligibility_reason": social_eligibility["social_eligibility_reason"],
-                "social_eligibility_updated_at": now_text,
-                "oldest_pair_created_at_utc": social_eligibility["oldest_pair_created_at_utc"],
-                "oldest_pair_age_minutes": social_eligibility["oldest_pair_age_minutes"],
-                "selected_pair_created_at_utc": social_eligibility["selected_pair_created_at_utc"],
+                    "social_eligibility": social_eligibility["social_eligibility"],
+                    "social_eligibility_reason": social_eligibility["social_eligibility_reason"],
+                    "social_eligibility_updated_at": now_text,
+                    "oldest_pair_created_at_utc": social_eligibility["oldest_pair_created_at_utc"],
+                    "oldest_pair_age_minutes": social_eligibility["oldest_pair_age_minutes"],
+                    "selected_pair_created_at_utc": social_eligibility["selected_pair_created_at_utc"],
+                    "minimum_token_age_inferred_minutes": social_eligibility["minimum_token_age_inferred_minutes"],
+                    "minimum_token_age_inferred_source": social_eligibility["minimum_token_age_inferred_source"],
                 }
             )
             if market_score is not None:
@@ -1505,7 +1460,6 @@ def run_cycle(dry_run=False, session=requests):
         "dex_not_found": dex_not_found,
         "errors": errors,
         "dex_batch_calls": dex_batch_calls,
-        "token_age": token_age_summary,
         "market_score_weights": weights,
         "watchlist_retention": retention_summary,
     }

@@ -63,19 +63,12 @@ ops_alerts:
 
 market_ranker:
   score_weights:
-    liquidity: 5
-    volume_h24: 4
-    txns_h24: 3
-    age: 5
-
-  token_age:
-    enabled: true
-    api_key_env: ETHERSCAN_API_KEY
-    refresh_hours: 6
-    sleep_seconds: 0.2
+    quote_liquidity: 5
+    volume_h24: 3
+    txns_h24: 4
+    minimum_token_age_inferred: 5
 
   social_eligibility:
-    max_token_age_minutes: 1440
     max_pool_age_minutes: 1440
 
   market_sanity:

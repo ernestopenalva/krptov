@@ -118,19 +118,6 @@ class SocialEligibilityTests(unittest.TestCase):
                 market_ranker, "DATA_DIR", root
             ), patch.object(
                 market_ranker, "utc_now", return_value=current_time
-            ), patch.object(
-                market_ranker.token_age_resolver,
-                "resolve_token_ages",
-                return_value=(
-                    {
-                        watchlist_key: {
-                            "token_age_status": "resolved",
-                            "token_age_minutes": 10,
-                            "token_created_at_utc": "2026-06-05T11:50:00Z",
-                        }
-                    },
-                    {"enabled": True, "checked": 1, "resolved": 1, "errors": 0},
-                ),
             ):
                 market_ranker.run_cycle(
                     dry_run=False,
@@ -143,9 +130,10 @@ class SocialEligibilityTests(unittest.TestCase):
             self.assertEqual(entry["social_eligibility_reason"], "old_market")
             self.assertEqual(entry["oldest_pair_created_at_utc"], "2026-06-03T10:00:00Z")
             self.assertEqual(entry["selected_pair_created_at_utc"], "2026-06-05T11:55:00Z")
+            self.assertEqual(entry["minimum_token_age_inferred_source"], "oldest_pair")
             self.assertIsNotNone(entry.get("market_score"))
 
-    def test_ranker_blocks_social_when_token_age_is_old(self):
+    def test_ranker_marks_fresh_market_eligible_without_contract_age(self):
         current_time = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
         fresh_pair_created_at = int(datetime(2026, 6, 5, 11, 55, 0, tzinfo=timezone.utc).timestamp() * 1000)
 
@@ -197,19 +185,6 @@ class SocialEligibilityTests(unittest.TestCase):
                 market_ranker, "DATA_DIR", root
             ), patch.object(
                 market_ranker, "utc_now", return_value=current_time
-            ), patch.object(
-                market_ranker.token_age_resolver,
-                "resolve_token_ages",
-                return_value=(
-                    {
-                        watchlist_key: {
-                            "token_age_status": "resolved",
-                            "token_age_minutes": 1500,
-                            "token_created_at_utc": "2026-06-04T11:00:00Z",
-                        }
-                    },
-                    {"enabled": True, "checked": 1, "resolved": 1, "errors": 0},
-                ),
             ):
                 market_ranker.run_cycle(
                     dry_run=False,
@@ -218,8 +193,10 @@ class SocialEligibilityTests(unittest.TestCase):
 
             updated = json.loads(watchlist_file.read_text(encoding="utf-8"))
             entry = updated[watchlist_key]
-            self.assertEqual(entry["social_eligibility"], "blocked_old_token")
-            self.assertEqual(entry["social_eligibility_reason"], "old_token")
+            self.assertEqual(entry["social_eligibility"], "eligible")
+            self.assertEqual(entry["social_eligibility_reason"], "fresh_market")
+            self.assertEqual(entry["minimum_token_age_inferred_source"], "oldest_pair")
+            self.assertEqual(entry["minimum_token_age_inferred_minutes"], 5)
 
     def test_social_inference_skips_blocked_old_market_without_querying_x(self):
         with tempfile.TemporaryDirectory() as temp_dir:

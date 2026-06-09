@@ -31,6 +31,8 @@ class WatchlistRankingTests(unittest.TestCase):
                 "volume_h24": 3400,
                 "txns_h24": 12,
                 "market_sanity_status": "ok",
+                "minimum_token_age_inferred_minutes": 45,
+                "minimum_token_age_inferred_source": "oldest_pair",
             },
             "base:0x2222222222222222222222222222222222222222": {
                 "chain": "base",
@@ -62,6 +64,8 @@ class WatchlistRankingTests(unittest.TestCase):
         self.assertEqual(rows[0]["txns"], "12")
         self.assertEqual(rows[0]["sanity"], "ok")
         self.assertEqual(rows[0]["ca"], "0x1111111111111111111111111111111111111111")
+        self.assertEqual(rows[0]["minimum_age"], "45m")
+        self.assertEqual(rows[0]["age_source"], "old")
         self.assertIn(("ca", "CA", 42), watchlist_ranking.table_columns(width=160))
         self.assertNotIn(("ca", "CA", 42), watchlist_ranking.table_columns(width=80))
 
