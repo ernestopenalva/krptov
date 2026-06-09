@@ -67,9 +67,10 @@ market_ranker:
     volume_h24: 3
     txns_h24: 4
     minimum_token_age_inferred: 5
+    pool_diversity: 1
 
   social_eligibility:
-    max_pool_age_minutes: 1440
+    max_pool_age_minutes: 30
 
   market_sanity:
     misleading_liquidity_usd_threshold: 100000

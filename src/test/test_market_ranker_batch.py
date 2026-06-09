@@ -175,6 +175,58 @@ class MarketRankerBatchTests(unittest.TestCase):
         self.assertEqual(components["quote_liquidity"], 10)
         self.assertLess(score, 15)
 
+    def test_market_score_sums_quote_liquidity_and_pool_diversity(self):
+        current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
+        token_address = "0x1111111111111111111111111111111111111111"
+        entry = token_entry(token_address, f"ethereum:{token_address}")
+        weth_pair = {
+            "chainId": "ethereum",
+            "dexId": "uniswap",
+            "pairAddress": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "baseToken": {"address": token_address, "symbol": "TEST", "name": "Test Token"},
+            "quoteToken": {"address": "0x0000000000000000000000000000000000000000", "symbol": "WETH"},
+            "priceNative": "0.001",
+            "priceUsd": "2",
+            "pairCreatedAt": int(datetime(2026, 6, 6, 11, 56, 0, tzinfo=timezone.utc).timestamp() * 1000),
+            "liquidity": {"usd": 5000, "base": 1000, "quote": 2},
+            "volume": {"h24": 1000},
+            "txns": {"h24": {"buys": 10, "sells": 10}},
+        }
+        usdc_pair = {
+            **weth_pair,
+            "pairAddress": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "quoteToken": {"address": "0x0000000000000000000000000000000000000001", "symbol": "USDC"},
+            "liquidity": {"usd": 7000, "base": 2000, "quote": 3000},
+        }
+
+        score, components, metrics = market_ranker.calculate_market_score(
+            weth_pair,
+            entry,
+            current_time,
+            weights={
+                "quote_liquidity": 5,
+                "volume_h24": 3,
+                "txns_h24": 4,
+                "minimum_token_age_inferred": 5,
+                "pool_diversity": 1,
+            },
+            inferred_age={
+                "minimum_token_age_inferred_minutes": 4,
+                "minimum_token_age_inferred_source": "oldest_pair",
+            },
+            pairs=[weth_pair, usdc_pair],
+        )
+
+        self.assertEqual(metrics["quote_liquidity_usd"], 7000)
+        self.assertEqual(metrics["selected_quote_liquidity_usd"], 4000)
+        self.assertEqual(metrics["pairs_count"], 2)
+        self.assertEqual(metrics["distinct_quote_count"], 2)
+        self.assertTrue(metrics["has_native_quote"])
+        self.assertTrue(metrics["has_stable_quote"])
+        self.assertEqual(metrics["pool_diversity_score"], 2)
+        self.assertEqual(components["pool_diversity"], 100)
+        self.assertGreater(score, 80)
+
     def test_watchlist_retention_applies_blind_cap_without_removing_protected(self):
         current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
 

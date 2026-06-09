@@ -253,6 +253,63 @@ class SocialEligibilityTests(unittest.TestCase):
             self.assertEqual(entry["social_skip_reason"], "social_eligibility_blocked_old_market")
             self.assertIn("social_last_skipped_at", entry)
 
+    def test_social_inference_continues_active_token_after_eligibility_expires(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            watchlist_file = root / "watchlist.json"
+            lock_file = root / "watchlist.lock"
+            latest_file = root / "social_inference_latest.json"
+            alerts_file = root / "social_alerts.json"
+            posts_dir = root / "social_posts"
+            alert_posts_dir = root / "social_alert_posts"
+            logs_dir = root / "logs"
+            token_address = "0x1111111111111111111111111111111111111111"
+            watchlist_key = f"ethereum:{token_address}"
+            watchlist_file.write_text(
+                json.dumps(
+                    {
+                        watchlist_key: {
+                            "watchlist_key": watchlist_key,
+                            "chain": "ethereum",
+                            "chain_id": "ethereum",
+                            "token_address": token_address,
+                            "status": "ativo",
+                            "social_status": "ativo",
+                            "monitor_status": "pendente",
+                            "market_score": 75,
+                            "social_eligibility": "blocked_old_market",
+                            "social_eligibility_reason": "old_market",
+                            "social_monitoring_started_at": "2026-06-05T12:00:00",
+                            "social_monitoring_expires_at": "2099-06-05T12:00:00",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(social_inference, "DATA_DIR", root), patch.object(
+                social_inference, "LOGS_DIR", logs_dir
+            ), patch.object(social_inference, "WATCHLIST_FILE", watchlist_file), patch.object(
+                social_inference, "WATCHLIST_LOCK_FILE", lock_file
+            ), patch.object(social_inference, "LATEST_SNAPSHOT_FILE", latest_file), patch.object(
+                social_inference, "ALERTS_FILE", alerts_file
+            ), patch.object(social_inference, "POSTS_DIR", posts_dir), patch.object(
+                social_inference, "ALERT_POSTS_DIR", alert_posts_dir
+            ), patch.object(
+                social_inference, "load_bearer_token", return_value="fake-token"
+            ), patch.object(
+                social_inference,
+                "search_token_mentions",
+                return_value={"data": []},
+            ):
+                snapshot = social_inference.run_cycle()
+
+            self.assertEqual(snapshot["tokens_checked"], 1)
+            self.assertEqual(snapshot["tokens_blocked_by_social_eligibility"], 0)
+            updated = json.loads(watchlist_file.read_text(encoding="utf-8"))
+            self.assertEqual(updated[watchlist_key]["social_status"], "ativo")
+            self.assertNotEqual(updated[watchlist_key].get("social_skip_reason"), "social_eligibility_blocked_old_market")
+
     def test_social_inference_requires_eligible_and_numeric_market_score(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -87,11 +87,12 @@ def format_compact_number(value):
 
 def display_name(entry):
     symbol = entry.get("token_symbol")
-    name = entry.get("token_name")
-    if symbol and name:
-        return f"{symbol}/{name}"
+    quote = entry.get("quote_token")
+    if symbol and quote and quote != "-":
+        return f"{symbol}/{quote}"
     if symbol:
         return str(symbol)
+    name = entry.get("token_name")
     if name:
         return str(name)
     return short_address(entry["token_address"])
@@ -150,6 +151,7 @@ def normalize_entry(key, entry):
         "source": entry.get("source") or "unknown",
         "quote_token": entry.get("quote_token") or "-",
         "status": entry.get("status") or "-",
+        "social_status": entry.get("social_status") or "-",
         "social_eligibility": entry.get("social_eligibility") or "missing",
         "market_score": numeric_or_none(entry.get("market_score")),
         "liquidity_usd": numeric_or_none(entry.get("liquidity_usd")),
@@ -160,6 +162,9 @@ def normalize_entry(key, entry):
         "oldest_pair_age_minutes": numeric_or_none(entry.get("oldest_pair_age_minutes")),
         "minimum_token_age_inferred_minutes": numeric_or_none(entry.get("minimum_token_age_inferred_minutes")),
         "minimum_token_age_inferred_source": entry.get("minimum_token_age_inferred_source") or "-",
+        "pairs_count": numeric_or_none(entry.get("pairs_count")),
+        "distinct_quote_count": numeric_or_none(entry.get("distinct_quote_count")),
+        "pool_diversity_score": numeric_or_none(entry.get("pool_diversity_score")),
         "times_seen": int(entry.get("times_seen") or 0),
         "last_seen_at_utc": entry.get("last_seen_at_utc") or entry.get("created_at_utc") or "",
         "token_address": entry.get("token_address") or key.split(":", 1)[-1],
@@ -169,9 +174,10 @@ def normalize_entry(key, entry):
 
 
 def social_ready(entry):
+    monitoring_active = entry["status"] == "ativo" or entry.get("social_status") == "ativo"
     return (
         entry["status"] in {"novo", "ativo"}
-        and entry["social_eligibility"] == "eligible"
+        and (entry["social_eligibility"] == "eligible" or monitoring_active)
         and entry["market_score"] is not None
     )
 
@@ -230,18 +236,19 @@ def table_rows(entries, previous_positions, top):
         rows.append(
             {
                 "pos": str(index),
-                "move": movement_marker(entry["watchlist_key"], index, previous_positions),
                 "score": format_score(entry["market_score"]),
                 "chain": compact_chain(entry["chain"]),
                 "source": compact_source(entry["source"]),
                 "quote": entry["quote_token"],
                 "elig": compact_eligibility(entry["social_eligibility"]),
                 "minimum_age": format_age(entry["minimum_token_age_inferred_minutes"]),
-                "age_source": compact_age_source(entry["minimum_token_age_inferred_source"]),
                 "liq": format_money(entry["liquidity_usd"]),
                 "quote_liq": format_money(entry["quote_liquidity_usd"]),
                 "vol": format_money(entry["volume_h24"]),
                 "txns": format_compact_number(entry["txns_h24"]),
+                "pairs": format_compact_number(entry["pairs_count"]),
+                "quotes": format_compact_number(entry["distinct_quote_count"]),
+                "pool_div": format_compact_number(entry["pool_diversity_score"]),
                 "sanity": short_sanity(entry["market_sanity_status"]),
                 "ca": entry["token_address"],
                 "name": display_name(entry),
@@ -260,18 +267,19 @@ def table_columns(width=None):
     if width >= 145:
         return [
             ("pos", "#", 3),
-            ("move", "Mov", 4),
             ("score", "Score", 6),
             ("chain", "Chn", 3),
             ("source", "Src", 6),
             ("quote", "Qte", 5),
             ("elig", "Elig", 5),
             ("minimum_age", "MinAg", 5),
-            ("age_source", "SrcA", 4),
             ("liq", "LiqDS", 8),
             ("quote_liq", "QLiq", 8),
             ("vol", "Vol", 8),
             ("txns", "Tx24h", 6),
+            ("pairs", "Pairs", 5),
+            ("quotes", "Quotes", 6),
+            ("pool_div", "PoolD", 5),
             ("sanity", "San", 3),
             ("ca", "CA", 42),
             ("name", "Nome", 18),
@@ -279,18 +287,19 @@ def table_columns(width=None):
 
     return [
         ("pos", "#", 3),
-        ("move", "Mov", 3),
         ("score", "Score", 5),
         ("chain", "Chn", 3),
         ("source", "Src", 5),
         ("quote", "Qte", 4),
         ("elig", "Elig", 5),
         ("minimum_age", "MinA", 4),
-        ("age_source", "ASrc", 4),
         ("liq", "LiqDS", 6),
         ("quote_liq", "QLiq", 6),
         ("vol", "Vol", 6),
         ("txns", "Tx24h", 5),
+        ("pairs", "Pair", 4),
+        ("quotes", "Qts", 3),
+        ("pool_div", "Div", 3),
         ("sanity", "San", 3),
         ("name", "Nome", 8),
     ]
@@ -353,7 +362,7 @@ def parse_args():
         description="Mostra o ranking atual da Watchlist do KRPTO-V.",
     )
     parser.add_argument("--watchlist", type=Path, default=WATCHLIST_FILE)
-    parser.add_argument("--top", type=int, default=20)
+    parser.add_argument("--top", type=int, default=25)
     parser.add_argument("--chain", choices=["ethereum", "base"])
     parser.add_argument("--source")
     parser.add_argument("--eligible-only", action="store_true")

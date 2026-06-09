@@ -57,6 +57,15 @@ STABLE_QUOTE_SYMBOLS = {
     "USDBC",
     "DAI",
 }
+POOL_DIVERSITY_NATIVE_QUOTES = {
+    "ETH",
+    "WETH",
+}
+POOL_DIVERSITY_STABLE_QUOTES = {
+    "USDC",
+    "USDT",
+}
+POOL_DIVERSITY_TRUSTED_QUOTES = POOL_DIVERSITY_NATIVE_QUOTES | POOL_DIVERSITY_STABLE_QUOTES
 MISLEADING_LIQUIDITY_USD_THRESHOLD = 100_000
 MISLEADING_QUOTE_LIQUIDITY_USD_THRESHOLD = 1_000
 DEPRECATED_WATCHLIST_FIELDS = {
@@ -74,6 +83,7 @@ DEFAULT_CONFIG = {
             "volume_h24": 3,
             "txns_h24": 4,
             "minimum_token_age_inferred": 5,
+            "pool_diversity": 1,
         },
         "watchlist_retention": {
             "enabled": True,
@@ -87,7 +97,7 @@ DEFAULT_CONFIG = {
             "low_score_threshold": 35,
         },
         "social_eligibility": {
-            "max_pool_age_minutes": 1440,
+            "max_pool_age_minutes": 30,
         },
         "market_sanity": {
             "misleading_liquidity_usd_threshold": 100_000,
@@ -756,6 +766,73 @@ def quote_liquidity_metrics(pair, token_address, config=None):
     }
 
 
+def pool_diversity_metrics(pairs):
+    trusted_quotes = set()
+
+    for pair in pairs or []:
+        side = trusted_quote_side(pair)
+        symbol = quote_symbol_for_side(pair, side) if side else None
+        if symbol in POOL_DIVERSITY_TRUSTED_QUOTES:
+            trusted_quotes.add(symbol)
+
+    has_native_quote = bool(trusted_quotes & POOL_DIVERSITY_NATIVE_QUOTES)
+    has_stable_quote = bool(trusted_quotes & POOL_DIVERSITY_STABLE_QUOTES)
+    distinct_quote_count = len(trusted_quotes)
+
+    if has_native_quote and has_stable_quote:
+        pool_diversity_score = 2
+    elif distinct_quote_count > 1:
+        pool_diversity_score = 1
+    else:
+        pool_diversity_score = 0
+
+    return {
+        "pairs_count": len(pairs or []),
+        "distinct_quote_count": distinct_quote_count,
+        "has_native_quote": has_native_quote,
+        "has_stable_quote": has_stable_quote,
+        "pool_diversity_score": pool_diversity_score,
+    }
+
+
+def aggregate_quote_liquidity_metrics(pairs, selected_pair, token_address, config=None):
+    config = config or DEFAULT_CONFIG["market_ranker"]["market_sanity"]
+    selected_metrics = quote_liquidity_metrics(selected_pair, token_address, config=config)
+    total_quote_liquidity_usd = 0
+    has_quote_liquidity = False
+
+    for pair in pairs or []:
+        metrics = quote_liquidity_metrics(pair, token_address, config=config)
+        quote_liquidity_usd = metrics.get("quote_liquidity_usd")
+        if quote_liquidity_usd is None:
+            continue
+        total_quote_liquidity_usd += quote_liquidity_usd
+        has_quote_liquidity = True
+
+    aggregate_quote_liquidity_usd = round(total_quote_liquidity_usd, 2) if has_quote_liquidity else None
+    dex_liquidity = selected_metrics["liquidity_usd"]
+    misleading = (
+        dex_liquidity > float(config.get("misleading_liquidity_usd_threshold") or MISLEADING_LIQUIDITY_USD_THRESHOLD)
+        and aggregate_quote_liquidity_usd is not None
+        and aggregate_quote_liquidity_usd < float(
+            config.get("misleading_quote_liquidity_usd_threshold")
+            or MISLEADING_QUOTE_LIQUIDITY_USD_THRESHOLD
+        )
+    )
+
+    selected_metrics.update(
+        {
+            "selected_quote_liquidity_usd": selected_metrics.get("quote_liquidity_usd"),
+            "quote_liquidity_usd": aggregate_quote_liquidity_usd,
+            "market_sanity_status": MARKET_SANITY_MISLEADING_LIQUIDITY if misleading else MARKET_SANITY_OK,
+            "market_sanity_reason": MARKET_SANITY_REASON_MISLEADING_LIQUIDITY if misleading else None,
+            "misleading_liquidity": misleading,
+            **pool_diversity_metrics(pairs),
+        }
+    )
+    return selected_metrics
+
+
 def select_best_pair(pairs, entry):
     if not pairs:
         return None, "not_found"
@@ -917,11 +994,23 @@ def component_age(age_minutes):
     return 0
 
 
+def component_pool_diversity(value):
+    try:
+        score = int(value or 0)
+    except (TypeError, ValueError):
+        score = 0
+    if score >= 2:
+        return 100
+    if score == 1:
+        return 50
+    return 0
+
+
 def token_start_time(entry):
     return parse_iso(entry.get("created_at_utc")) or parse_iso(entry.get("discovered_at_utc"))
 
 
-def calculate_market_score(pair, entry, current_time, weights=None, sanity_config=None, inferred_age=None):
+def calculate_market_score(pair, entry, current_time, weights=None, sanity_config=None, inferred_age=None, pairs=None):
     weights = weights or DEFAULT_CONFIG["market_ranker"]["score_weights"]
     sanity_config = sanity_config or DEFAULT_CONFIG["market_ranker"]["market_sanity"]
     total_weight = sum(float(value) for value in weights.values())
@@ -931,7 +1020,12 @@ def calculate_market_score(pair, entry, current_time, weights=None, sanity_confi
 
     age_minutes = numeric_or_none(inferred_age.get("minimum_token_age_inferred_minutes")) if inferred_age else None
 
-    quote_metrics = quote_liquidity_metrics(pair, entry.get("token_address"), config=sanity_config)
+    quote_metrics = aggregate_quote_liquidity_metrics(
+        pairs or [pair],
+        pair,
+        entry.get("token_address"),
+        config=sanity_config,
+    )
     quote_liquidity = quote_metrics.get("quote_liquidity_usd")
     if quote_liquidity is None:
         quote_liquidity = quote_metrics["liquidity_usd"]
@@ -943,12 +1037,11 @@ def calculate_market_score(pair, entry, current_time, weights=None, sanity_confi
         "volume_h24": component_volume(volume),
         "txns_h24": component_txns(txns),
         "minimum_token_age_inferred": component_age(age_minutes),
+        "pool_diversity": component_pool_diversity(quote_metrics.get("pool_diversity_score")),
     }
-    score = (
-        components["quote_liquidity"] * weights["quote_liquidity"]
-        + components["volume_h24"] * weights["volume_h24"]
-        + components["txns_h24"] * weights["txns_h24"]
-        + components["minimum_token_age_inferred"] * weights["minimum_token_age_inferred"]
+    score = sum(
+        components.get(key, 0) * float(weight)
+        for key, weight in weights.items()
     ) / total_weight
 
     if quote_metrics["misleading_liquidity"]:
@@ -1382,6 +1475,7 @@ def run_cycle(dry_run=False, session=requests):
                     weights=weights,
                     sanity_config=sanity_config,
                     inferred_age=inferred_age,
+                    pairs=pairs,
                 )
                 dex_found += 1
             else:

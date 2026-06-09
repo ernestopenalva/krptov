@@ -23,6 +23,7 @@ class WatchlistRankingTests(unittest.TestCase):
                 "token_address": "0x1111111111111111111111111111111111111111",
                 "token_symbol": "AAA",
                 "token_name": "Alpha",
+                "quote_token": "WETH",
                 "status": "novo",
                 "social_eligibility": "eligible",
                 "market_score": 10,
@@ -33,6 +34,9 @@ class WatchlistRankingTests(unittest.TestCase):
                 "market_sanity_status": "ok",
                 "minimum_token_age_inferred_minutes": 45,
                 "minimum_token_age_inferred_source": "oldest_pair",
+                "pairs_count": 2,
+                "distinct_quote_count": 2,
+                "pool_diversity_score": 2,
             },
             "base:0x2222222222222222222222222222222222222222": {
                 "chain": "base",
@@ -56,7 +60,7 @@ class WatchlistRankingTests(unittest.TestCase):
         self.assertEqual(ranked[0]["market_score"], 90)
         self.assertEqual(ranked[1]["market_score"], 10)
         self.assertEqual(ranked[2]["social_eligibility"], "pending")
-        self.assertEqual(watchlist_ranking.display_name(ranked[1]), "AAA/Alpha")
+        self.assertEqual(watchlist_ranking.display_name(ranked[1]), "AAA/WETH")
         rows = watchlist_ranking.table_rows([ranked[1]], {}, top=1)
         self.assertEqual(rows[0]["liq"], "$1.2K")
         self.assertEqual(rows[0]["quote_liq"], "$900")
@@ -65,7 +69,9 @@ class WatchlistRankingTests(unittest.TestCase):
         self.assertEqual(rows[0]["sanity"], "ok")
         self.assertEqual(rows[0]["ca"], "0x1111111111111111111111111111111111111111")
         self.assertEqual(rows[0]["minimum_age"], "45m")
-        self.assertEqual(rows[0]["age_source"], "old")
+        self.assertEqual(rows[0]["pairs"], "2")
+        self.assertEqual(rows[0]["quotes"], "2")
+        self.assertEqual(rows[0]["pool_div"], "2")
         self.assertIn(("ca", "CA", 42), watchlist_ranking.table_columns(width=160))
         self.assertNotIn(("ca", "CA", 42), watchlist_ranking.table_columns(width=80))
 

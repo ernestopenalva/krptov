@@ -484,7 +484,8 @@ def is_social_eligibility_blocked(entry):
 
 def social_query_skip_reason(entry, config):
     required_eligibility = config.get("require_social_eligibility")
-    if required_eligibility and entry.get("social_eligibility") != required_eligibility:
+    monitoring_active = entry.get("status") == STATUS_ATIVO or entry.get("social_status") == SOCIAL_STATUS_ATIVO
+    if required_eligibility and entry.get("social_eligibility") != required_eligibility and not monitoring_active:
         if is_social_eligibility_blocked(entry):
             return SOCIAL_SKIP_REASON_OLD_MARKET
         return SOCIAL_SKIP_REASON_NOT_ELIGIBLE
