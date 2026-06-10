@@ -175,7 +175,7 @@ class MarketRankerBatchTests(unittest.TestCase):
         self.assertEqual(components["quote_liquidity"], 10)
         self.assertLess(score, 15)
 
-    def test_market_score_sums_quote_liquidity_and_pool_diversity(self):
+    def test_market_score_sums_quote_liquidity_across_pairs(self):
         current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
         token_address = "0x1111111111111111111111111111111111111111"
         entry = token_entry(token_address, f"ethereum:{token_address}")
@@ -208,7 +208,6 @@ class MarketRankerBatchTests(unittest.TestCase):
                 "volume_h24": 3,
                 "txns_h24": 4,
                 "minimum_token_age_inferred": 5,
-                "pool_diversity": 1,
             },
             inferred_age={
                 "minimum_token_age_inferred_minutes": 4,
@@ -219,12 +218,6 @@ class MarketRankerBatchTests(unittest.TestCase):
 
         self.assertEqual(metrics["quote_liquidity_usd"], 7000)
         self.assertEqual(metrics["selected_quote_liquidity_usd"], 4000)
-        self.assertEqual(metrics["pairs_count"], 2)
-        self.assertEqual(metrics["distinct_quote_count"], 2)
-        self.assertTrue(metrics["has_native_quote"])
-        self.assertTrue(metrics["has_stable_quote"])
-        self.assertEqual(metrics["pool_diversity_score"], 2)
-        self.assertEqual(components["pool_diversity"], 100)
         self.assertGreater(score, 80)
 
     def test_watchlist_retention_applies_blind_cap_without_removing_protected(self):

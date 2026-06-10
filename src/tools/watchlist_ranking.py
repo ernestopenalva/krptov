@@ -133,6 +133,18 @@ def compact_eligibility(value):
     return mapping.get(value, str(value or "-"))
 
 
+def compact_status(value):
+    mapping = {
+        "novo": "novo",
+        "ativo": "ativ",
+        "descarte": "desc",
+        "pendente": "pend",
+        "concluido": "conc",
+        "-": "-",
+    }
+    return mapping.get(value, str(value or "-")[:4])
+
+
 def compact_age_source(value):
     mapping = {
         "oldest_pair": "old",
@@ -162,9 +174,6 @@ def normalize_entry(key, entry):
         "oldest_pair_age_minutes": numeric_or_none(entry.get("oldest_pair_age_minutes")),
         "minimum_token_age_inferred_minutes": numeric_or_none(entry.get("minimum_token_age_inferred_minutes")),
         "minimum_token_age_inferred_source": entry.get("minimum_token_age_inferred_source") or "-",
-        "pairs_count": numeric_or_none(entry.get("pairs_count")),
-        "distinct_quote_count": numeric_or_none(entry.get("distinct_quote_count")),
-        "pool_diversity_score": numeric_or_none(entry.get("pool_diversity_score")),
         "times_seen": int(entry.get("times_seen") or 0),
         "last_seen_at_utc": entry.get("last_seen_at_utc") or entry.get("created_at_utc") or "",
         "token_address": entry.get("token_address") or key.split(":", 1)[-1],
@@ -240,15 +249,14 @@ def table_rows(entries, previous_positions, top):
                 "chain": compact_chain(entry["chain"]),
                 "source": compact_source(entry["source"]),
                 "quote": entry["quote_token"],
+                "status": compact_status(entry["status"]),
+                "social_status": compact_status(entry["social_status"]),
                 "elig": compact_eligibility(entry["social_eligibility"]),
                 "minimum_age": format_age(entry["minimum_token_age_inferred_minutes"]),
                 "liq": format_money(entry["liquidity_usd"]),
                 "quote_liq": format_money(entry["quote_liquidity_usd"]),
                 "vol": format_money(entry["volume_h24"]),
                 "txns": format_compact_number(entry["txns_h24"]),
-                "pairs": format_compact_number(entry["pairs_count"]),
-                "quotes": format_compact_number(entry["distinct_quote_count"]),
-                "pool_div": format_compact_number(entry["pool_diversity_score"]),
                 "sanity": short_sanity(entry["market_sanity_status"]),
                 "ca": entry["token_address"],
                 "name": display_name(entry),
@@ -271,15 +279,14 @@ def table_columns(width=None):
             ("chain", "Chn", 3),
             ("source", "Src", 6),
             ("quote", "Qte", 5),
+            ("status", "WL", 4),
+            ("social_status", "Soc", 4),
             ("elig", "Elig", 5),
             ("minimum_age", "MinAg", 5),
             ("liq", "LiqDS", 8),
             ("quote_liq", "QLiq", 8),
             ("vol", "Vol", 8),
             ("txns", "Tx24h", 6),
-            ("pairs", "Pairs", 5),
-            ("quotes", "Quotes", 6),
-            ("pool_div", "PoolD", 5),
             ("sanity", "San", 3),
             ("ca", "CA", 42),
             ("name", "Nome", 18),
@@ -291,15 +298,14 @@ def table_columns(width=None):
         ("chain", "Chn", 3),
         ("source", "Src", 5),
         ("quote", "Qte", 4),
+        ("status", "WL", 4),
+        ("social_status", "Soc", 4),
         ("elig", "Elig", 5),
         ("minimum_age", "MinA", 4),
         ("liq", "LiqDS", 6),
         ("quote_liq", "QLiq", 6),
         ("vol", "Vol", 6),
         ("txns", "Tx24h", 5),
-        ("pairs", "Pair", 4),
-        ("quotes", "Qts", 3),
-        ("pool_div", "Div", 3),
         ("sanity", "San", 3),
         ("name", "Nome", 8),
     ]
@@ -329,6 +335,8 @@ def print_summary(watchlist, entries, args, previous_positions):
     print(f"Visiveis no filtro: {len(entries)}")
     print(f"Candidatos social: {len(social_candidates)}")
     print(f"Por chain: {dict(Counter(entry['chain'] for entry in all_entries))}")
+    print(f"Status WL: {dict(Counter(entry['status'] for entry in all_entries))}")
+    print(f"Status social: {dict(Counter(entry['social_status'] for entry in all_entries))}")
     print(f"Social eligibility: {dict(Counter(entry['social_eligibility'] for entry in all_entries))}")
     print(f"Minimum age source: {dict(Counter(entry['minimum_token_age_inferred_source'] for entry in all_entries))}")
     print(f"Market sanity: {dict(Counter(entry['market_sanity_status'] for entry in all_entries))}")

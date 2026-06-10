@@ -85,10 +85,98 @@ def build_dexscreener_url(chain_id, token_address):
     return f"https://dexscreener.com/{dexscreener_chain_slug(chain_id)}/{token_address}"
 
 
+def gmgn_chain_slug(chain_id):
+    if chain_id == "ethereum":
+        return "eth"
+    if chain_id == "base":
+        return "base"
+    return chain_id
+
+
+def build_gmgn_url(chain_id, token_address):
+    if not chain_id or not token_address:
+        return None
+
+    return f"https://gmgn.ai/{gmgn_chain_slug(chain_id)}/token/{token_address}"
+
+
+def default_quote_for_chain(chain_id):
+    if chain_id == "base":
+        return "BASE"
+    if chain_id == "ethereum":
+        return "ETH"
+    return None
+
+
+def token_pair_label(entry, chain_id):
+    selected_pair = entry.get("selected_pair") or {}
+    base_token = selected_pair.get("baseToken") or {}
+    quote_token = selected_pair.get("quoteToken") or {}
+    token_symbol = entry.get("token_symbol") or base_token.get("symbol") or "TOKEN"
+    quote_symbol = (
+        entry.get("quote_token")
+        or quote_token.get("symbol")
+        or default_quote_for_chain(chain_id)
+        or "QUOTE"
+    )
+    return f"{token_symbol}/{quote_symbol}"
+
+
+def affiliation_label(alert, prefix="author"):
+    found = alert.get(f"{prefix}_affiliation_found")
+    if not found:
+        return None
+
+    name = alert.get(f"{prefix}_affiliation_name")
+    username = alert.get(f"{prefix}_affiliation_username")
+    affiliation_id = alert.get(f"{prefix}_affiliation_id")
+    raw = alert.get(f"{prefix}_affiliation_raw")
+
+    if isinstance(raw, dict):
+        name = name or raw.get("name") or raw.get("label")
+        username = username or raw.get("username") or raw.get("screen_name") or raw.get("handle")
+        affiliation_id = affiliation_id or raw.get("id") or raw.get("user_id")
+    elif isinstance(raw, str):
+        name = name or raw
+
+    if username:
+        username = str(username).lstrip("@")
+
+    if name and username:
+        return f"{name} (@{username})"
+    if name:
+        return str(name)
+    if username:
+        return f"@{username}"
+    if affiliation_id:
+        return f"id={affiliation_id}"
+    return "presente"
+
+
 def format_alert_reason(reason):
     reason = str(reason or "").strip()
     if not reason:
         return None
+
+    if reason.startswith("author_followers_") and ">=" in reason:
+        level, followers = reason.split(">=", 1)
+        level = level.replace("author_followers_", "")
+        level_text = {
+            "medium": "boa audiência",
+            "high": "grande audiência",
+            "critical": "audiência muito alta",
+        }.get(level, "audiência relevante")
+        return f"autor com {level_text} ({format_number(followers)} seguidores)"
+
+    reason_labels = {
+        "author_verified_business": "autor com verificação empresarial",
+        "author_verified_government": "autor com verificação governamental",
+        "author_affiliation": "autor afiliado a uma organização",
+        "author_affiliation_found": "autor afiliado a uma organização",
+        "automated_operator_detected": "post indica operador ou automação por trás do token",
+    }
+    if reason in reason_labels:
+        return reason_labels[reason]
 
     if reason.startswith("author_followers_") and ">=" in reason:
         level, followers = reason.split(">=", 1)
@@ -130,47 +218,46 @@ def first_trigger_post(alert):
 def build_alert_message(alert, entry=None):
     entry = entry or {}
     trigger_post = first_trigger_post(alert)
-    token_symbol = (
-        entry.get("token_symbol")
-        or (entry.get("selected_pair") or {}).get("baseToken", {}).get("symbol")
-        or "indisponivel"
-    )
-    token_name = (
-        entry.get("token_name")
-        or (entry.get("selected_pair") or {}).get("baseToken", {}).get("name")
-        or "indisponivel"
-    )
     chain_id = alert.get("chain_id") or entry.get("chain_id") or entry.get("chain") or "unknown"
     token_address = alert.get("token_address") or entry.get("token_address")
+    pair_label = token_pair_label(entry, chain_id)
     reasons = alert.get("alert_reasons") or []
     reason_text = format_alert_reasons(reasons)
     author = alert.get("author_username") or trigger_post.get("author_username") or "indisponivel"
     followers = alert.get("author_followers") or alert.get("best_author_followers")
-    dex_url = (
-        (entry.get("selected_pair") or {}).get("url")
-        or entry.get("dexscreener_url")
-        or build_dexscreener_url(chain_id, token_address)
-    )
+    gmgn_url = build_gmgn_url(chain_id, token_address)
     post_url = trigger_post.get("url")
+    affiliation = affiliation_label(alert, "author")
+    best_followers = alert.get("best_followers_author_summary") or {}
 
     lines = [
         "<b>KRPTO-V | Alerta social</b>",
         f"<b>Rank:</b> {escape_html(alert.get('alert_rank', 'indisponivel'))}",
-        f"<b>Token:</b> {escape_html(token_name)} / {escape_html(token_symbol)}",
+        f"<b>Token:</b> {escape_html(pair_label)}",
         f"<b>Chain:</b> {escape_html(chain_id)}",
         f"<b>Motivos:</b> {escape_html(reason_text)}",
         f"<b>Autor:</b> @{escape_html(author)}",
         f"<b>Seguidores:</b> {escape_html(format_number(followers))}",
     ]
 
-    if alert.get("author_verified_type"):
-        lines.append(f"<b>Verified type:</b> {escape_html(alert.get('author_verified_type'))}")
+    if affiliation:
+        lines.append(f"<b>Afiliação:</b> {escape_html(affiliation)}")
+    if (
+        best_followers.get("username")
+        and best_followers.get("username") != author
+        and best_followers.get("followers") is not None
+    ):
+        lines.append(
+            "<b>Maior audiência no resultado:</b> "
+            f"@{escape_html(best_followers.get('username'))} "
+            f"({escape_html(format_number(best_followers.get('followers')))} seguidores)"
+        )
     if alert.get("automated_operator_username"):
         lines.append(f"<b>Operador:</b> @{escape_html(alert.get('automated_operator_username'))}")
     if post_url:
         lines.append(f"<b>Post:</b> {escape_html(post_url)}")
-    if dex_url:
-        lines.append(f"<b>Dexscreener:</b> {escape_html(dex_url)}")
+    if gmgn_url:
+        lines.append(f"<b>GMGN:</b> {escape_html(gmgn_url)}")
     if token_address:
         lines.append(f"<b>Endereco completo:</b> <code>{escape_html(token_address)}</code>")
 

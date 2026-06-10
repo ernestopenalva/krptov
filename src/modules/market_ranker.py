@@ -57,15 +57,6 @@ STABLE_QUOTE_SYMBOLS = {
     "USDBC",
     "DAI",
 }
-POOL_DIVERSITY_NATIVE_QUOTES = {
-    "ETH",
-    "WETH",
-}
-POOL_DIVERSITY_STABLE_QUOTES = {
-    "USDC",
-    "USDT",
-}
-POOL_DIVERSITY_TRUSTED_QUOTES = POOL_DIVERSITY_NATIVE_QUOTES | POOL_DIVERSITY_STABLE_QUOTES
 MISLEADING_LIQUIDITY_USD_THRESHOLD = 100_000
 MISLEADING_QUOTE_LIQUIDITY_USD_THRESHOLD = 1_000
 DEPRECATED_WATCHLIST_FIELDS = {
@@ -83,7 +74,6 @@ DEFAULT_CONFIG = {
             "volume_h24": 3,
             "txns_h24": 4,
             "minimum_token_age_inferred": 5,
-            "pool_diversity": 1,
         },
         "watchlist_retention": {
             "enabled": True,
@@ -766,35 +756,6 @@ def quote_liquidity_metrics(pair, token_address, config=None):
     }
 
 
-def pool_diversity_metrics(pairs):
-    trusted_quotes = set()
-
-    for pair in pairs or []:
-        side = trusted_quote_side(pair)
-        symbol = quote_symbol_for_side(pair, side) if side else None
-        if symbol in POOL_DIVERSITY_TRUSTED_QUOTES:
-            trusted_quotes.add(symbol)
-
-    has_native_quote = bool(trusted_quotes & POOL_DIVERSITY_NATIVE_QUOTES)
-    has_stable_quote = bool(trusted_quotes & POOL_DIVERSITY_STABLE_QUOTES)
-    distinct_quote_count = len(trusted_quotes)
-
-    if has_native_quote and has_stable_quote:
-        pool_diversity_score = 2
-    elif distinct_quote_count > 1:
-        pool_diversity_score = 1
-    else:
-        pool_diversity_score = 0
-
-    return {
-        "pairs_count": len(pairs or []),
-        "distinct_quote_count": distinct_quote_count,
-        "has_native_quote": has_native_quote,
-        "has_stable_quote": has_stable_quote,
-        "pool_diversity_score": pool_diversity_score,
-    }
-
-
 def aggregate_quote_liquidity_metrics(pairs, selected_pair, token_address, config=None):
     config = config or DEFAULT_CONFIG["market_ranker"]["market_sanity"]
     selected_metrics = quote_liquidity_metrics(selected_pair, token_address, config=config)
@@ -827,7 +788,6 @@ def aggregate_quote_liquidity_metrics(pairs, selected_pair, token_address, confi
             "market_sanity_status": MARKET_SANITY_MISLEADING_LIQUIDITY if misleading else MARKET_SANITY_OK,
             "market_sanity_reason": MARKET_SANITY_REASON_MISLEADING_LIQUIDITY if misleading else None,
             "misleading_liquidity": misleading,
-            **pool_diversity_metrics(pairs),
         }
     )
     return selected_metrics
@@ -994,18 +954,6 @@ def component_age(age_minutes):
     return 0
 
 
-def component_pool_diversity(value):
-    try:
-        score = int(value or 0)
-    except (TypeError, ValueError):
-        score = 0
-    if score >= 2:
-        return 100
-    if score == 1:
-        return 50
-    return 0
-
-
 def token_start_time(entry):
     return parse_iso(entry.get("created_at_utc")) or parse_iso(entry.get("discovered_at_utc"))
 
@@ -1037,7 +985,6 @@ def calculate_market_score(pair, entry, current_time, weights=None, sanity_confi
         "volume_h24": component_volume(volume),
         "txns_h24": component_txns(txns),
         "minimum_token_age_inferred": component_age(age_minutes),
-        "pool_diversity": component_pool_diversity(quote_metrics.get("pool_diversity_score")),
     }
     score = sum(
         components.get(key, 0) * float(weight)

@@ -61,6 +61,15 @@ DEFAULT_CONFIG = {
     "excluded_author_usernames": [
         "dexsignals",
     ],
+    "automated_author_usernames": [
+        "bankrscanner",
+    ],
+    "automated_author_patterns": [
+        "scanner",
+        "signal",
+        "signals",
+        "bot",
+    ],
     "badges": {
         "alert_on_affiliation": True,
         "alert_on_verified_business": True,
@@ -505,7 +514,10 @@ def load_bearer_token():
 def build_x_query(token_address, config):
     excluded_usernames = [
         normalize_username(username)
-        for username in config.get("excluded_author_usernames", [])
+        for username in (
+            list(config.get("excluded_author_usernames", []) or [])
+            + list(config.get("automated_author_usernames", []) or [])
+        )
     ]
     excluded_usernames = [username for username in excluded_usernames if username]
     exclusions = " ".join(f"-from:{username}" for username in excluded_usernames)
@@ -727,6 +739,28 @@ def get_followers_count(user):
     return int(metrics.get("followers_count") or 0)
 
 
+def is_automated_author(user, config):
+    username = normalize_username(user.get("username"))
+    automated_usernames = {
+        normalize_username(value)
+        for value in (config.get("automated_author_usernames") or [])
+    }
+    automated_usernames.discard(None)
+    if username and username in automated_usernames:
+        return True
+
+    profile_text = " ".join(
+        str(user.get(key) or "")
+        for key in ["username", "name", "description"]
+    ).lower()
+    for pattern in config.get("automated_author_patterns") or []:
+        pattern = str(pattern or "").strip().lower()
+        if pattern and pattern in profile_text:
+            return True
+
+    return False
+
+
 def follower_rank(followers_count, config):
     thresholds = config["author_followers_thresholds"]
 
@@ -756,6 +790,9 @@ def badge_rank(user, config):
 
 
 def relevant_profile_signal(user, config, prefix):
+    if prefix == "author" and is_automated_author(user, config):
+        return 0, []
+
     followers_count = get_followers_count(user)
     rank = 0
     reasons = []
@@ -977,10 +1014,14 @@ def build_social_analysis(response_payload, config, bearer_token=None):
         tweet["krptov_engagement_rate"] = calculate_engagement_rate(tweet)
 
     for user in users:
+        automated_author = is_automated_author(user, config)
         followers_count = get_followers_count(user)
-        if followers_count > best_author_followers:
+        if not automated_author and followers_count > best_author_followers:
             best_author_followers = followers_count
             best_followers_author_summary = build_user_summary(user)
+
+        if automated_author:
+            continue
 
         user_rank, user_reasons = relevant_profile_signal(user, config, "author")
         if user_rank > alert_rank:
@@ -990,7 +1031,7 @@ def build_social_analysis(response_payload, config, bearer_token=None):
         if user_reasons:
             trigger_posts.extend(build_trigger_posts(user, tweets, user_reasons))
 
-        if get_affiliation(user):
+        if get_affiliation(user) and not automated_author:
             user_summary = build_user_summary(user)
             if not best_affiliation_author_summary or user_rank >= int(best_affiliation_author_summary.get("rank") or 0):
                 best_affiliation_author_summary = user_summary

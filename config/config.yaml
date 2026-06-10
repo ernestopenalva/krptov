@@ -29,6 +29,15 @@ social_inference:
   excluded_author_usernames:
     - dexsignals
 
+  automated_author_usernames:
+    - bankrscanner
+
+  automated_author_patterns:
+    - scanner
+    - signal
+    - signals
+    - bot
+
   followers_alert_threshold: 2000
 
   badges:
@@ -67,7 +76,6 @@ market_ranker:
     volume_h24: 3
     txns_h24: 4
     minimum_token_age_inferred: 5
-    pool_diversity: 1
 
   social_eligibility:
     max_pool_age_minutes: 30
