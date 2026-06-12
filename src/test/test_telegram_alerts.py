@@ -244,13 +244,12 @@ class TelegramNotifierTests(unittest.TestCase):
 
         message = telegram_notifier.build_alert_message(alert, entry)
 
-        self.assertIn("A&amp;B &lt;Coin&gt;", message)
-        self.assertIn("A&lt;B", message)
+        self.assertIn("A&lt;B/ETH", message)
         self.assertIn("alice&lt;admin&gt;", message)
         self.assertIn("name &lt;bad&gt;&amp;reason", message)
         self.assertNotIn("A&B <Coin>", message)
 
-    def test_alert_message_uses_human_reasons_and_dexscreener_link(self):
+    def test_alert_message_uses_human_reasons_and_gmgn_link(self):
         token_address = "0xe24659c4567af33a332fe4dfea2b38f40e9487c5"
         alert = {
             "alert_rank": 20,
@@ -265,9 +264,9 @@ class TelegramNotifierTests(unittest.TestCase):
         message = telegram_notifier.build_alert_message(alert, {})
 
         self.assertNotIn("<b>Endereco:</b>", message)
-        self.assertIn("Autor com boa audiência (7.528 seguidores)", message)
+        self.assertIn("autor com boa audiência (7.528 seguidores)", message)
         self.assertIn(
-            f"<b>Dexscreener:</b> https://dexscreener.com/ethereum/{token_address}",
+            f"<b>GMGN:</b> https://gmgn.ai/eth/token/{token_address}",
             message,
         )
         self.assertIn(f"<b>Endereco completo:</b> <code>{token_address}</code>", message)
@@ -402,7 +401,7 @@ class SocialInferenceTelegramTests(unittest.TestCase):
             self.assertEqual(snapshot["alerts_generated"], 0)
             self.assertTrue(entry["telegram_alert_sent"])
 
-    def test_rank_upgrade_sends_new_alert(self):
+    def test_rank_upgrade_is_not_sent_after_social_completion(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
 
@@ -416,10 +415,74 @@ class SocialInferenceTelegramTests(unittest.TestCase):
                 analysis=fake_analysis(rank=90, signature="rank_90"),
             )
 
-            self.assertEqual(success_mock.call_count, 2)
-            self.assertEqual(snapshot["alerts_generated"], 1)
-            self.assertEqual(entry["best_alert_rank"], 90)
-            self.assertEqual(entry["telegram_alert_signature"], "rank_90")
+            self.assertEqual(success_mock.call_count, 1)
+            self.assertEqual(snapshot["alerts_generated"], 0)
+            self.assertEqual(entry["best_alert_rank"], 80)
+            self.assertEqual(entry["telegram_alert_signature"], "rank_80")
+            self.assertEqual(entry["social_status"], "concluido")
+
+    def test_automated_author_does_not_rank_as_affiliated(self):
+        payload = {
+            "data": [
+                {
+                    "id": "1",
+                    "author_id": "u1",
+                    "text": "CA 0xabc",
+                    "created_at": "2026-06-10T12:00:00Z",
+                    "public_metrics": {},
+                }
+            ],
+            "includes": {
+                "users": [
+                    {
+                        "id": "u1",
+                        "username": "BaseAlphaOnly",
+                        "name": "Base Alpha Only",
+                        "automated_by": {"username": "Pixel_eth"},
+                        "affiliation": {"type": "automation"},
+                        "public_metrics": {"followers_count": 30000},
+                    }
+                ]
+            },
+        }
+
+        analysis = social_inference.build_social_analysis(payload, social_inference.DEFAULT_CONFIG)
+
+        self.assertEqual(analysis["alert_rank"], 0)
+        self.assertFalse(analysis["affiliation_found"])
+        self.assertEqual(analysis["alert_reasons"], [])
+
+    def test_qualified_affiliation_still_ranks(self):
+        payload = {
+            "data": [
+                {
+                    "id": "1",
+                    "author_id": "u1",
+                    "text": "CA 0xabc",
+                    "created_at": "2026-06-10T12:00:00Z",
+                    "public_metrics": {},
+                }
+            ],
+            "includes": {
+                "users": [
+                    {
+                        "id": "u1",
+                        "username": "gabbens",
+                        "name": "Gabbens",
+                        "affiliation": {"name": "Sigma", "username": "SigmaTrading"},
+                        "public_metrics": {"followers_count": 319},
+                    }
+                ]
+            },
+        }
+
+        analysis = social_inference.build_social_analysis(payload, social_inference.DEFAULT_CONFIG)
+
+        self.assertEqual(analysis["alert_rank"], 100)
+        self.assertTrue(analysis["affiliation_found"])
+        self.assertIn("author_affiliation_found", analysis["alert_reasons"])
+        self.assertEqual(analysis["origin_summary"]["author_affiliation_name"], "Sigma")
+        self.assertEqual(analysis["origin_summary"]["author_affiliation_username"], "SigmaTrading")
 
 
 if __name__ == "__main__":

@@ -18,13 +18,26 @@ social_inference:
   disable_post_metric_alerts: true
   require_social_eligibility: "eligible"
   require_numeric_market_score: true
-  monitoring_window_hours: 22
+  monitoring_window_hours: 24
   max_posts_per_token: 8
   cycle_interval_seconds: 180
-  max_new_tokens_per_day: 30
+  max_new_tokens_per_day: 0
   max_tokens_per_cycle: 30
-  max_new_tokens_per_cycle: 10
+  max_new_tokens_per_cycle: 0
+  max_social_checks_per_token: 5
   prioritize_market_score: true
+
+  wake_window:
+    enabled: true
+    timezone: "America/Sao_Paulo"
+    start: "10:00"
+    end: "02:00"
+
+  post_budget:
+    enabled: true
+    daily_post_budget: 300
+    bucket_minutes: 32
+    bucket_post_target: 10
 
   excluded_author_usernames:
     - dexsignals

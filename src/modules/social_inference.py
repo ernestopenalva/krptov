@@ -10,6 +10,10 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 from requests import HTTPError
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None
 
 from src.modules import telegram_notifier
 
@@ -32,6 +36,10 @@ SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET = "blocked_old_market"
 SOCIAL_SKIP_REASON_OLD_MARKET = "social_eligibility_blocked_old_market"
 SOCIAL_SKIP_REASON_NOT_ELIGIBLE = "social_eligibility_not_eligible"
 SOCIAL_SKIP_REASON_MISSING_MARKET_SCORE = "missing_numeric_market_score"
+SOCIAL_SKIP_REASON_POST_BUDGET = "post_budget_limit"
+SOCIAL_COMPLETED_REASON_ALERT_SENT = "alert_sent"
+SOCIAL_COMPLETED_REASON_MAX_CHECKS = "max_social_checks"
+SOCIAL_COMPLETED_REASON_SOCIAL_TIMEOUT = "social_timeout"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
@@ -48,12 +56,25 @@ DEFAULT_CONFIG = {
     "enabled": True,
     "scoring_mode": "origin_reputation",
     "disable_post_metric_alerts": True,
-    "monitoring_window_hours": 22,
+    "monitoring_window_hours": 24,
     "max_posts_per_token": 8,
     "cycle_interval_seconds": 180,
-    "max_new_tokens_per_day": 30,
+    "max_new_tokens_per_day": 0,
     "max_tokens_per_cycle": 0,
     "max_new_tokens_per_cycle": 0,
+    "wake_window": {
+        "enabled": True,
+        "timezone": "America/Sao_Paulo",
+        "start": "10:00",
+        "end": "02:00",
+    },
+    "post_budget": {
+        "enabled": True,
+        "daily_post_budget": 300,
+        "bucket_minutes": 32,
+        "bucket_post_target": 10,
+    },
+    "max_social_checks_per_token": 5,
     "prioritize_market_score": True,
     "require_social_eligibility": SOCIAL_ELIGIBILITY_ELIGIBLE,
     "require_numeric_market_score": True,
@@ -116,6 +137,100 @@ def parse_iso(value):
         return datetime.fromisoformat(str(value).replace("Z", ""))
     except ValueError:
         return None
+
+
+def parse_hhmm(value, default):
+    text = str(value or default).strip()
+    try:
+        hour_text, minute_text = text.split(":", 1)
+        return int(hour_text), int(minute_text)
+    except (TypeError, ValueError):
+        hour_text, minute_text = str(default).split(":", 1)
+        return int(hour_text), int(minute_text)
+
+
+def configured_now(config, fallback_time):
+    wake_config = config.get("wake_window") or {}
+    timezone_name = wake_config.get("timezone") or "America/Sao_Paulo"
+    if ZoneInfo is not None:
+        try:
+            return datetime.now(ZoneInfo(timezone_name)).replace(microsecond=0)
+        except Exception:
+            pass
+    return fallback_time
+
+
+def wake_window_bounds(local_time, config):
+    wake_config = config.get("wake_window") or {}
+    start_hour, start_minute = parse_hhmm(wake_config.get("start"), "10:00")
+    end_hour, end_minute = parse_hhmm(wake_config.get("end"), "02:00")
+    start = local_time.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+    end = local_time.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
+
+    if end <= start:
+        if local_time < end:
+            start -= timedelta(days=1)
+        else:
+            end += timedelta(days=1)
+
+    return start, end
+
+
+def is_wake_window_active(local_time, config):
+    wake_config = config.get("wake_window") or {}
+    if not wake_config.get("enabled", True):
+        return True
+
+    start, end = wake_window_bounds(local_time, config)
+    return start <= local_time < end
+
+
+def social_budget_date(local_time, config):
+    start, _ = wake_window_bounds(local_time, config)
+    return start.strftime("%Y-%m-%d")
+
+
+def bucket_state(local_time, config, usage):
+    budget_config = config.get("post_budget") or {}
+    bucket_minutes = max(1, int(budget_config.get("bucket_minutes") or 32))
+    bucket_target = max(1, int(budget_config.get("bucket_post_target") or 10))
+    daily_budget = max(0, int(budget_config.get("daily_post_budget") or 0))
+    start, _ = wake_window_bounds(local_time, config)
+    elapsed_minutes = max(0, int((local_time - start).total_seconds() // 60))
+    bucket_index = elapsed_minutes // bucket_minutes
+    allowed_posts = (bucket_index + 1) * bucket_target
+    if daily_budget > 0:
+        allowed_posts = min(daily_budget, allowed_posts)
+
+    posts_returned = int(usage.get("posts_returned") or 0)
+    return {
+        "bucket_index": bucket_index,
+        "bucket_minutes": bucket_minutes,
+        "bucket_post_target": bucket_target,
+        "daily_post_budget": daily_budget,
+        "posts_allowed_so_far": allowed_posts,
+        "posts_returned": posts_returned,
+        "posts_remaining_soft": max(0, allowed_posts - posts_returned),
+    }
+
+
+def can_spend_post_budget(local_time, config, usage):
+    budget_config = config.get("post_budget") or {}
+    if not budget_config.get("enabled", True):
+        return True
+
+    state = bucket_state(local_time, config, usage)
+    daily_budget = state["daily_post_budget"]
+    posts_returned = state["posts_returned"]
+    if daily_budget > 0 and posts_returned >= daily_budget:
+        return False
+
+    return posts_returned < state["posts_allowed_so_far"]
+
+
+def count_returned_posts(response_payload):
+    posts = response_payload.get("data") or []
+    return len(posts) if isinstance(posts, list) else 0
 
 
 def parse_config_value(value):
@@ -468,6 +583,8 @@ def build_social_candidates(watchlist, config, apply_limits=True):
         status = entry.get("status")
         if status not in [STATUS_NOVO, STATUS_ATIVO]:
             continue
+        if entry.get("social_status") == SOCIAL_STATUS_CONCLUIDO:
+            continue
 
         candidates.append(
             {
@@ -682,17 +799,10 @@ def calculate_engagement_rate(tweet):
     return round((engagement / impressions) * 100, 4)
 
 
-def get_affiliation(user):
-    affiliation = user.get("affiliation")
-    if isinstance(affiliation, dict):
-        return affiliation if affiliation else None
-    return affiliation or None
-
-
 def parse_affiliation(user):
     affiliation = user.get("affiliation")
     parsed = {
-        "found": bool(affiliation),
+        "found": False,
         "raw": affiliation or None,
         "name": None,
         "username": None,
@@ -707,14 +817,23 @@ def parse_affiliation(user):
         )
         parsed["id"] = affiliation.get("id") or affiliation.get("user_id")
         parsed["type"] = affiliation.get("type") or affiliation.get("verified_type")
+        parsed["found"] = bool(parsed["name"] or parsed["username"] or parsed["id"])
         return parsed
 
     if isinstance(affiliation, str):
         parsed["name"] = affiliation
         parsed["username"] = normalize_username(affiliation) if "@" in affiliation else None
+        parsed["found"] = bool(parsed["name"] or parsed["username"])
         return parsed
 
     return parsed
+
+
+def get_affiliation(user):
+    affiliation = parse_affiliation(user)
+    if not affiliation["found"]:
+        return None
+    return affiliation["raw"] or affiliation["name"] or affiliation["username"] or affiliation["id"]
 
 
 def get_author_badge(user):
@@ -747,6 +866,9 @@ def is_automated_author(user, config):
     }
     automated_usernames.discard(None)
     if username and username in automated_usernames:
+        return True
+
+    if get_automation_operator_username(user, config):
         return True
 
     profile_text = " ".join(
@@ -1156,6 +1278,7 @@ def start_social_monitoring(entry, current_time, config):
     entry["social_status"] = SOCIAL_STATUS_ATIVO
     entry["social_monitoring_started_at"] = to_iso(started_at)
     entry["social_monitoring_expires_at"] = to_iso(expires_at)
+    entry["social_checks_count"] = int(entry.get("social_checks_count") or 0)
 
 
 def needs_social_monitoring_start(entry):
@@ -1163,11 +1286,50 @@ def needs_social_monitoring_start(entry):
 
 
 def expire_social_monitoring(entry, current_time):
-    entry["status"] = STATUS_DESCARTE
+    complete_social_monitoring(
+        entry,
+        current_time,
+        SOCIAL_COMPLETED_REASON_SOCIAL_TIMEOUT,
+        discard=entry.get("telegram_alert_sent") is not True,
+    )
+
+
+def complete_social_monitoring(entry, current_time, reason, discard=False):
     entry["social_status"] = SOCIAL_STATUS_CONCLUIDO
-    entry["status_reason"] = STATUS_REASON_SOCIAL_TIMEOUT
-    entry["discarded_reason"] = STATUS_REASON_SOCIAL_TIMEOUT
     entry["social_monitoring_completed_at"] = to_iso(current_time)
+    entry["social_completed_reason"] = reason
+    if discard:
+        entry["status"] = STATUS_DESCARTE
+        entry["status_reason"] = reason
+        entry["discarded_reason"] = reason
+
+
+def increment_social_checks(entry):
+    entry["social_checks_count"] = int(entry.get("social_checks_count") or 0) + 1
+    return entry["social_checks_count"]
+
+
+def reached_max_social_checks(entry, config):
+    max_checks = int(config.get("max_social_checks_per_token") or 0)
+    return max_checks > 0 and int(entry.get("social_checks_count") or 0) >= max_checks
+
+
+def finish_after_alert(entry, current_time):
+    complete_social_monitoring(
+        entry,
+        current_time,
+        SOCIAL_COMPLETED_REASON_ALERT_SENT,
+        discard=False,
+    )
+
+
+def finish_after_max_checks(entry, current_time):
+    complete_social_monitoring(
+        entry,
+        current_time,
+        SOCIAL_COMPLETED_REASON_MAX_CHECKS,
+        discard=True,
+    )
 
 
 def build_alert(
@@ -1226,6 +1388,8 @@ def build_alert(
         "raw_alert_posts_file": raw_alert_posts_file,
         "social_monitoring_started_at": entry.get("social_monitoring_started_at"),
         "social_monitoring_expires_at": entry.get("social_monitoring_expires_at"),
+        "social_checks_count": entry.get("social_checks_count"),
+        "social_completed_reason": entry.get("social_completed_reason"),
         "telegram_alert_sent": bool(entry.get("telegram_alert_sent", False)),
         "telegram_alert_sent_at": entry.get("telegram_alert_sent_at"),
         "telegram_message_id": entry.get("telegram_message_id"),
@@ -1249,16 +1413,18 @@ def load_alerts():
     return []
 
 
-def daily_usage_file(current_time):
-    return DATA_DIR / f"social_inference_usage_{current_time.strftime('%Y-%m-%d')}.json"
+def daily_usage_file(usage_date):
+    return DATA_DIR / f"social_inference_usage_{usage_date}.json"
 
 
-def load_daily_usage(current_time):
-    path = daily_usage_file(current_time)
+def load_daily_usage(usage_date):
+    path = daily_usage_file(usage_date)
     default_usage = {
-        "date": current_time.strftime("%Y-%m-%d"),
+        "date": usage_date,
         "new_tokens_started": 0,
         "tokens_started": [],
+        "posts_returned": 0,
+        "checks": 0,
     }
 
     if not path.exists():
@@ -1273,11 +1439,13 @@ def load_daily_usage(current_time):
     loaded.setdefault("date", default_usage["date"])
     loaded.setdefault("new_tokens_started", 0)
     loaded.setdefault("tokens_started", [])
+    loaded.setdefault("posts_returned", 0)
+    loaded.setdefault("checks", 0)
     return loaded
 
 
-def save_daily_usage(current_time, usage):
-    atomic_save_json(daily_usage_file(current_time), usage)
+def save_daily_usage(usage_date, usage):
+    atomic_save_json(daily_usage_file(usage_date), usage)
 
 
 def can_start_new_social_token(config, usage):
@@ -1296,6 +1464,20 @@ def register_new_social_token_started(token_address, current_time, usage, chain_
             "chain_id": chain_id,
             "watchlist_key": watchlist_key,
             "started_at": to_iso(current_time),
+        }
+    )
+
+
+def register_social_check_usage(token_address, current_time, usage, posts_returned, chain_id=None, watchlist_key=None):
+    usage["posts_returned"] = int(usage.get("posts_returned") or 0) + int(posts_returned or 0)
+    usage["checks"] = int(usage.get("checks") or 0) + 1
+    usage.setdefault("checks_log", []).append(
+        {
+            "token_address": token_address,
+            "chain_id": chain_id,
+            "watchlist_key": watchlist_key,
+            "checked_at": to_iso(current_time),
+            "posts_returned": int(posts_returned or 0),
         }
     )
 
@@ -1393,6 +1575,9 @@ def build_history_record(token_address, status_before, entry, analysis, alert_ge
         "status_after": entry.get("status"),
         "posts_found": analysis["posts_found"],
         "users_found": analysis["users_found"],
+        "social_checks_count": entry.get("social_checks_count"),
+        "social_completed_reason": entry.get("social_completed_reason"),
+        "social_last_posts_returned": entry.get("social_last_posts_returned"),
         "best_post_score": analysis["best_post_score"],
         "best_author_followers": analysis["best_author_followers"],
         "author_badge_found": analysis["author_badge_found"],
@@ -1439,10 +1624,10 @@ def social_managed_update(entry):
 
     if entry.get("status") == STATUS_ATIVO:
         update["status"] = STATUS_ATIVO
-    elif entry.get("status_reason") == STATUS_REASON_SOCIAL_TIMEOUT:
+    elif entry.get("status") == STATUS_DESCARTE:
         update["status"] = STATUS_DESCARTE
-        update["status_reason"] = STATUS_REASON_SOCIAL_TIMEOUT
-        update["discarded_reason"] = STATUS_REASON_SOCIAL_TIMEOUT
+        update["status_reason"] = entry.get("status_reason")
+        update["discarded_reason"] = entry.get("discarded_reason")
 
     return update
 
@@ -1489,8 +1674,11 @@ def print_summary(snapshot):
         f"Alertas gerados: {snapshot['alerts_generated']}",
         f"Tokens expirados: {snapshot['tokens_expired']}",
         f"Tokens bloqueados pelo limite diario: {snapshot.get('tokens_blocked_by_daily_limit', 0)}",
+        f"Tokens bloqueados pelo orcamento de posts: {snapshot.get('tokens_blocked_by_post_budget', 0)}",
         f"Tokens bloqueados por social_eligibility: {snapshot.get('tokens_blocked_by_social_eligibility', 0)}",
         f"Tokens bloqueados por market_score: {snapshot.get('tokens_blocked_by_market_score', 0)}",
+        f"Posts retornados no dia social: {snapshot.get('posts_returned_today', 0)}",
+        f"Janela social ativa: {snapshot.get('wake_window_active', True)}",
         f"Erros: {len(snapshot['errors'])}",
     ]
 
@@ -1505,6 +1693,8 @@ def run_cycle(config_file=CONFIG_FILE):
 
     config = load_config(Path(config_file))
     current_time = now()
+    local_time = configured_now(config, current_time)
+    usage_date = social_budget_date(local_time, config)
     now_text = to_iso(current_time)
     date_stamp = current_time.strftime("%Y-%m-%d")
     errors = []
@@ -1518,12 +1708,41 @@ def run_cycle(config_file=CONFIG_FILE):
             "alerts_generated": 0,
             "tokens_expired": 0,
             "tokens_blocked_by_daily_limit": 0,
+            "tokens_blocked_by_post_budget": 0,
             "tokens_blocked_by_social_eligibility": 0,
             "tokens_blocked_by_market_score": 0,
+            "posts_returned_today": 0,
+            "wake_window_active": False,
+            "usage_date": usage_date,
             "errors": [],
         }
         atomic_save_json(LATEST_SNAPSHOT_FILE, snapshot)
         write_log_lines(["=== KRPTO-V | Social Inference ===", "Modulo desabilitado no config."], current_time)
+        return snapshot
+
+    if not is_wake_window_active(local_time, config):
+        daily_usage = load_daily_usage(usage_date)
+        budget = bucket_state(local_time, config, daily_usage)
+        snapshot = {
+            "timestamp": now_text,
+            "version": SOCIAL_INFERENCE_VERSION,
+            "enabled": True,
+            "tokens_checked": 0,
+            "alerts_generated": 0,
+            "tokens_expired": 0,
+            "tokens_blocked_by_daily_limit": 0,
+            "tokens_blocked_by_post_budget": 0,
+            "tokens_blocked_by_social_eligibility": 0,
+            "tokens_blocked_by_market_score": 0,
+            "posts_returned_today": int(daily_usage.get("posts_returned") or 0),
+            "post_budget": budget,
+            "wake_window_active": False,
+            "usage_date": usage_date,
+            "errors": [],
+        }
+        atomic_save_json(LATEST_SNAPSHOT_FILE, snapshot)
+        summary_lines = print_summary(snapshot)
+        write_log_lines(summary_lines + ["Fora da janela de vigilia social."], current_time)
         return snapshot
 
     bearer_token = load_bearer_token()
@@ -1537,8 +1756,12 @@ def run_cycle(config_file=CONFIG_FILE):
             "alerts_generated": 0,
             "tokens_expired": 0,
             "tokens_blocked_by_daily_limit": 0,
+            "tokens_blocked_by_post_budget": 0,
             "tokens_blocked_by_social_eligibility": 0,
             "tokens_blocked_by_market_score": 0,
+            "posts_returned_today": 0,
+            "wake_window_active": True,
+            "usage_date": usage_date,
             "errors": [error],
         }
         atomic_save_json(LATEST_SNAPSHOT_FILE, snapshot)
@@ -1547,13 +1770,14 @@ def run_cycle(config_file=CONFIG_FILE):
         return snapshot
 
     alerts = load_alerts()
-    daily_usage = load_daily_usage(current_time)
+    daily_usage = load_daily_usage(usage_date)
     telegram_config = config.get("telegram_alerts") or {}
     telegram_env = telegram_notifier.load_telegram_env(PROJECT_ROOT / ".env")
     tokens_checked = 0
     alerts_generated = 0
     tokens_expired = 0
     tokens_blocked_by_daily_limit = 0
+    tokens_blocked_by_post_budget = 0
     tokens_blocked_by_social_eligibility = 0
     tokens_blocked_by_market_score = 0
     with watchlist_lock():
@@ -1608,6 +1832,12 @@ def run_cycle(config_file=CONFIG_FILE):
                 tokens_blocked_by_daily_limit += 1
                 continue
 
+            if not can_spend_post_budget(local_time, config, daily_usage):
+                entry["social_last_skipped_at"] = now_text
+                entry["social_skip_reason"] = SOCIAL_SKIP_REASON_POST_BUDGET
+                tokens_blocked_by_post_budget += 1
+                break
+
             try:
                 response_payload = search_token_mentions(
                     token_address=normalized_address,
@@ -1638,6 +1868,17 @@ def run_cycle(config_file=CONFIG_FILE):
                 )
 
             entry["social_last_checked_at"] = now_text
+            posts_returned = count_returned_posts(response_payload)
+            entry["social_last_posts_returned"] = posts_returned
+            increment_social_checks(entry)
+            register_social_check_usage(
+                normalized_address,
+                current_time,
+                daily_usage,
+                posts_returned,
+                chain_id=chain_id,
+                watchlist_key=watchlist_key,
+            )
 
             save_raw_posts(normalized_address, response_payload, current_time, chain_id=chain_id)
             tracked_tweet_ids = entry.get("social_tracked_tweet_ids") or []
@@ -1660,6 +1901,7 @@ def run_cycle(config_file=CONFIG_FILE):
             alert_generated = False
             if should_generate_alert(entry, analysis):
                 apply_alert(entry, analysis, current_time)
+                finish_after_alert(entry, current_time)
                 raw_alert_posts_file = save_alert_posts_snapshot(
                     normalized_address,
                     analysis_payload,
@@ -1703,6 +1945,8 @@ def run_cycle(config_file=CONFIG_FILE):
                     float(entry.get("best_social_score") or 0),
                     float(analysis["best_post_score"] or 0),
                 )
+                if reached_max_social_checks(entry, config):
+                    finish_after_max_checks(entry, current_time)
 
             history_record = build_history_record(
                 token_address=normalized_address,
@@ -1726,13 +1970,18 @@ def run_cycle(config_file=CONFIG_FILE):
         "alerts_generated": alerts_generated,
         "tokens_expired": tokens_expired,
         "tokens_blocked_by_daily_limit": tokens_blocked_by_daily_limit,
+        "tokens_blocked_by_post_budget": tokens_blocked_by_post_budget,
         "tokens_blocked_by_social_eligibility": tokens_blocked_by_social_eligibility,
         "tokens_blocked_by_market_score": tokens_blocked_by_market_score,
+        "posts_returned_today": int(daily_usage.get("posts_returned") or 0),
+        "post_budget": bucket_state(local_time, config, daily_usage),
+        "wake_window_active": True,
+        "usage_date": usage_date,
         "errors": errors,
     }
 
     atomic_save_json(ALERTS_FILE, alerts)
-    save_daily_usage(current_time, daily_usage)
+    save_daily_usage(usage_date, daily_usage)
     atomic_save_json(LATEST_SNAPSHOT_FILE, snapshot)
 
     summary_lines = print_summary(snapshot)

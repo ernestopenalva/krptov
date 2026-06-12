@@ -10,6 +10,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WATCHLIST_FILE = PROJECT_ROOT / "data" / "watchlist.json"
+CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
 
 
 def utc_now_iso():
@@ -27,6 +28,28 @@ def load_watchlist(path=WATCHLIST_FILE):
         raise ValueError("data/watchlist.json precisa ser um dict.")
 
     return payload
+
+
+def load_max_social_checks(path=CONFIG_FILE, default=5):
+    if not path.exists():
+        return default
+
+    in_social = False
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw_line.split("#", 1)[0].strip()
+        if not stripped:
+            continue
+        if not raw_line.startswith(" ") and stripped.endswith(":"):
+            in_social = stripped[:-1] == "social_inference"
+            continue
+        if in_social and stripped.startswith("max_social_checks_per_token:"):
+            _, value = stripped.split(":", 1)
+            try:
+                return int(value.strip().strip('"').strip("'"))
+            except ValueError:
+                return default
+
+    return default
 
 
 def numeric_or_none(value):
@@ -153,6 +176,27 @@ def compact_age_source(value):
     return mapping.get(value, str(value or "-"))
 
 
+def compact_completed_reason(value):
+    mapping = {
+        "alert_sent": "alert",
+        "max_social_checks": "maxchk",
+        "social_timeout": "time",
+        "social_eligibility_blocked_old_market": "old_m",
+        None: "-",
+        "": "-",
+    }
+    return mapping.get(value, str(value or "-")[:6])
+
+
+def format_social_checks(value, max_checks):
+    number = numeric_or_none(value)
+    if number is None:
+        return "-"
+    if max_checks and max_checks > 0:
+        return f"{int(number)}/{max_checks}"
+    return str(int(number))
+
+
 def normalize_entry(key, entry):
     if not isinstance(entry, dict):
         return None
@@ -164,6 +208,10 @@ def normalize_entry(key, entry):
         "quote_token": entry.get("quote_token") or "-",
         "status": entry.get("status") or "-",
         "social_status": entry.get("social_status") or "-",
+        "social_checks_count": numeric_or_none(entry.get("social_checks_count")),
+        "social_completed_reason": entry.get("social_completed_reason") or "-",
+        "social_last_posts_returned": numeric_or_none(entry.get("social_last_posts_returned")),
+        "telegram_alert_sent": entry.get("telegram_alert_sent") is True,
         "social_eligibility": entry.get("social_eligibility") or "missing",
         "market_score": numeric_or_none(entry.get("market_score")),
         "liquidity_usd": numeric_or_none(entry.get("liquidity_usd")),
@@ -183,7 +231,13 @@ def normalize_entry(key, entry):
 
 
 def social_ready(entry):
-    monitoring_active = entry["status"] == "ativo" or entry.get("social_status") == "ativo"
+    if entry.get("social_status") == "concluido":
+        return False
+
+    monitoring_active = (
+        entry.get("social_status") == "ativo"
+        or (entry["status"] == "ativo" and entry.get("social_status") in {"-", "pendente"})
+    )
     return (
         entry["status"] in {"novo", "ativo"}
         and (entry["social_eligibility"] == "eligible" or monitoring_active)
@@ -238,7 +292,7 @@ def movement_marker(key, position, previous_positions):
     return f"down {position - previous}"
 
 
-def table_rows(entries, previous_positions, top):
+def table_rows(entries, previous_positions, top, max_social_checks=5):
     rows = []
 
     for index, entry in enumerate(entries[:top], start=1):
@@ -251,6 +305,8 @@ def table_rows(entries, previous_positions, top):
                 "quote": entry["quote_token"],
                 "status": compact_status(entry["status"]),
                 "social_status": compact_status(entry["social_status"]),
+                "checks": format_social_checks(entry["social_checks_count"], max_social_checks),
+                "done": compact_completed_reason(entry["social_completed_reason"]),
                 "elig": compact_eligibility(entry["social_eligibility"]),
                 "minimum_age": format_age(entry["minimum_token_age_inferred_minutes"]),
                 "liq": format_money(entry["liquidity_usd"]),
@@ -281,6 +337,8 @@ def table_columns(width=None):
             ("quote", "Qte", 5),
             ("status", "WL", 4),
             ("social_status", "Soc", 4),
+            ("checks", "Chk", 4),
+            ("done", "Done", 6),
             ("elig", "Elig", 5),
             ("minimum_age", "MinAg", 5),
             ("liq", "LiqDS", 8),
@@ -300,6 +358,7 @@ def table_columns(width=None):
         ("quote", "Qte", 4),
         ("status", "WL", 4),
         ("social_status", "Soc", 4),
+        ("checks", "Chk", 4),
         ("elig", "Elig", 5),
         ("minimum_age", "MinA", 4),
         ("liq", "LiqDS", 6),
@@ -322,12 +381,15 @@ def print_table(rows, width=None):
 
 
 def print_summary(watchlist, entries, args, previous_positions):
+    max_social_checks = load_max_social_checks()
     all_entries = [
         normalize_entry(key, entry)
         for key, entry in watchlist.items()
     ]
     all_entries = [entry for entry in all_entries if entry]
     social_candidates = [entry for entry in all_entries if social_ready(entry)]
+    social_active = [entry for entry in all_entries if entry["social_status"] == "ativo"]
+    social_done = [entry for entry in all_entries if entry["social_status"] == "concluido"]
 
     print("=== KRPTO-V | Watchlist Ranking ===")
     print(f"Atualizado: {utc_now_iso()}")
@@ -337,8 +399,9 @@ def print_summary(watchlist, entries, args, previous_positions):
     print(f"Por chain: {dict(Counter(entry['chain'] for entry in all_entries))}")
     print(f"Status WL: {dict(Counter(entry['status'] for entry in all_entries))}")
     print(f"Status social: {dict(Counter(entry['social_status'] for entry in all_entries))}")
+    print(f"Social em observacao: {len(social_active)} | concluidos: {len(social_done)}")
+    print(f"Conclusao social: {dict(Counter(entry['social_completed_reason'] for entry in social_done))}")
     print(f"Social eligibility: {dict(Counter(entry['social_eligibility'] for entry in all_entries))}")
-    print(f"Minimum age source: {dict(Counter(entry['minimum_token_age_inferred_source'] for entry in all_entries))}")
     print(f"Market sanity: {dict(Counter(entry['market_sanity_status'] for entry in all_entries))}")
     if args.chain:
         print(f"Filtro chain: {args.chain}")
@@ -347,7 +410,7 @@ def print_summary(watchlist, entries, args, previous_positions):
     if args.eligible_only:
         print("Filtro: apenas candidatos elegiveis para social")
     print()
-    print_table(table_rows(entries, previous_positions, args.top))
+    print_table(table_rows(entries, previous_positions, args.top, max_social_checks=max_social_checks))
 
 
 def clear_screen():
