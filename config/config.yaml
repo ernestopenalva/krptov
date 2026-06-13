@@ -92,7 +92,7 @@ market_ranker:
     minimum_token_age_inferred: 5
 
   social_eligibility:
-    max_pool_age_minutes: 30
+    max_pool_age_minutes: 120
 
   market_sanity:
     misleading_liquidity_usd_threshold: 100000
