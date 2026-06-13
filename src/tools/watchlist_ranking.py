@@ -270,6 +270,8 @@ def filter_entries(entries, args, min_social_age_minutes=30):
             continue
         if args.source and entry["source"] != args.source:
             continue
+        if args.active_only and entry["status"] != "ativo" and entry["social_status"] != "ativo":
+            continue
         if args.eligible_only and not social_ready(entry, min_social_age_minutes=min_social_age_minutes):
             continue
         filtered.append(entry)
@@ -431,6 +433,8 @@ def print_summary(watchlist, entries, args, previous_positions):
         print(f"Filtro source: {args.source}")
     if args.eligible_only:
         print("Filtro: apenas candidatos elegiveis para social")
+    if args.active_only:
+        print("Filtro: apenas ativos")
     print()
     print_table(table_rows(entries, previous_positions, args.top, max_social_checks=max_social_checks))
 
@@ -459,6 +463,7 @@ def parse_args():
     parser.add_argument("--chain", choices=["ethereum", "base"])
     parser.add_argument("--source")
     parser.add_argument("--eligible-only", action="store_true")
+    parser.add_argument("--active-only", action="store_true")
     parser.add_argument("--watch", action="store_true")
     parser.add_argument("--interval", type=int, default=15)
     return parser.parse_args()

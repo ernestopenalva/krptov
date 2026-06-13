@@ -9,6 +9,7 @@ def args(**updates):
         "chain": None,
         "source": None,
         "eligible_only": False,
+        "active_only": False,
         "top": 30,
     }
     defaults.update(updates)
