@@ -1,6 +1,7 @@
 import html
 import os
 from datetime import datetime
+from urllib.parse import urlparse
 
 import requests
 from dotenv import load_dotenv
@@ -84,6 +85,35 @@ def format_x_user_link(username):
     return f'<a href="{escape_html(x_profile_url(username))}">@{escape_html(username)}</a>'
 
 
+def first_list_value(value):
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+def username_from_x_url(value):
+    if not value:
+        return None
+
+    value = str(value).strip()
+    parsed = urlparse(value)
+    host = parsed.netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+
+    if host not in {"x.com", "twitter.com"}:
+        return None
+
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if not path_parts:
+        return None
+
+    username = path_parts[0].strip().lstrip("@")
+    if username in {"i", "intent", "share", "hashtag", "search"}:
+        return None
+    return username or None
+
+
 def dexscreener_chain_slug(chain_id):
     if chain_id == "ethereum":
         return "ethereum"
@@ -144,15 +174,19 @@ def affiliation_label(alert, prefix="author"):
     name = alert.get(f"{prefix}_affiliation_name")
     username = alert.get(f"{prefix}_affiliation_username")
     raw = alert.get(f"{prefix}_affiliation_raw")
+    url = alert.get(f"{prefix}_affiliation_url")
 
     if isinstance(raw, dict):
-        name = name or raw.get("name") or raw.get("label")
+        name = name or raw.get("description") or raw.get("name") or raw.get("label")
         username = username or raw.get("username") or raw.get("screen_name") or raw.get("handle")
+        url = url or raw.get("url")
     elif isinstance(raw, str):
         name = name or raw
 
     if username:
-        username = str(username).lstrip("@")
+        username = str(first_list_value(username)).lstrip("@")
+
+    username = username or username_from_x_url(first_list_value(url))
 
     if name and username:
         return f"{name} (@{username})"
@@ -170,15 +204,19 @@ def summary_affiliation_label(summary):
     name = summary.get("affiliation_name")
     username = summary.get("affiliation_username")
     raw = summary.get("affiliation_raw")
+    url = summary.get("affiliation_url")
 
     if isinstance(raw, dict):
-        name = name or raw.get("name") or raw.get("label")
+        name = name or raw.get("description") or raw.get("name") or raw.get("label")
         username = username or raw.get("username") or raw.get("screen_name") or raw.get("handle")
+        url = url or raw.get("url")
     elif isinstance(raw, str):
         name = name or raw
 
     if username:
-        username = str(username).lstrip("@")
+        username = str(first_list_value(username)).lstrip("@")
+
+    username = username or username_from_x_url(first_list_value(url))
 
     if name and username:
         return f"{name} (@{username})"
@@ -274,13 +312,17 @@ def format_alert_reason(reason, alert=None):
             return f"autor com {level_text} {format_x_user_link(username)} ({escape_html(format_number(followers))} seguidores)"
         return f"autor com {level_text} ({escape_html(format_number(followers))} seguidores)"
 
+    if reason in {"author_affiliation", "author_affiliation_found"}:
+        affiliation = best_affiliation_label(alert)
+        if affiliation and affiliation != "presente":
+            return f"autor afiliado a {format_affiliation_html(affiliation)}"
+        return "autor afiliado a uma organização"
+
     reason_labels = {
         "author_verified_business": "conta verificada como organização",
         "verified_type_business": "conta verificada como organização",
         "author_verified_government": "conta verificada como governo",
         "verified_type_government": "conta verificada como governo",
-        "author_affiliation": "autor afiliado a uma organização",
-        "author_affiliation_found": "autor afiliado a uma organização",
         "automated_operator_detected": "post indica operador ou automação por trás do token",
     }
     if reason in reason_labels:

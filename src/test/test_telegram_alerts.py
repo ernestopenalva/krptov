@@ -321,6 +321,37 @@ class TelegramNotifierTests(unittest.TestCase):
         self.assertNotIn("Maior audiência no resultado", message)
 
 
+    def test_alert_message_extracts_affiliation_username_from_raw_url(self):
+        alert = {
+            "alert_rank": 100,
+            "chain_id": "base",
+            "token_address": "0xc3ebe0574abf86adb818deec5b3bb7435d490ba3",
+            "alert_reasons": ["author_affiliation_found"],
+            "author_username": "panzonhl",
+            "author_followers": 638,
+            "author_affiliation_found": True,
+            "author_affiliation_raw": {
+                "description": "Based",
+                "url": "https://twitter.com/BasedBot",
+                "user_id": ["1800483217327157248"],
+                "badge_url": "https://pbs.twimg.com/profile_images/based.jpg",
+            },
+            "trigger_posts": [{"url": "https://x.com/panzonhl/status/1", "author_username": "panzonhl"}],
+        }
+
+        message = telegram_notifier.build_alert_message(alert, {"token_symbol": "FABLEBOY", "quote_token": "USDC"})
+
+        self.assertIn(
+            'autor afiliado a Based (<a href="https://x.com/BasedBot">@BasedBot</a>)',
+            message,
+        )
+        self.assertIn(
+            '<b>Afiliação:</b> Based (<a href="https://x.com/BasedBot">@BasedBot</a>)',
+            message,
+        )
+        self.assertNotIn("<b>Afiliação:</b> presente", message)
+
+
 class SocialInferenceTelegramTests(unittest.TestCase):
     def run_social_cycle(self, root, send_alert_mock, analysis=None):
         watchlist_file = root / "watchlist.json"
