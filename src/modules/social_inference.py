@@ -37,6 +37,7 @@ SOCIAL_SKIP_REASON_OLD_MARKET = "social_eligibility_blocked_old_market"
 SOCIAL_SKIP_REASON_NOT_ELIGIBLE = "social_eligibility_not_eligible"
 SOCIAL_SKIP_REASON_MISSING_MARKET_SCORE = "missing_numeric_market_score"
 SOCIAL_SKIP_REASON_POST_BUDGET = "post_budget_limit"
+SOCIAL_SKIP_REASON_TOO_YOUNG = "social_age_too_young"
 SOCIAL_COMPLETED_REASON_ALERT_SENT = "alert_sent"
 SOCIAL_COMPLETED_REASON_MAX_CHECKS = "max_social_checks"
 SOCIAL_COMPLETED_REASON_SOCIAL_TIMEOUT = "social_timeout"
@@ -74,7 +75,8 @@ DEFAULT_CONFIG = {
         "bucket_minutes": 32,
         "bucket_post_target": 10,
     },
-    "max_social_checks_per_token": 5,
+    "max_social_checks_per_token": 3,
+    "min_social_age_minutes": 30,
     "prioritize_market_score": True,
     "require_social_eligibility": SOCIAL_ELIGIBILITY_ELIGIBLE,
     "require_numeric_market_score": True,
@@ -537,16 +539,10 @@ def timestamp_sort_value(value):
 
 def social_candidate_sort_key(candidate):
     entry = candidate["entry"]
-    status = entry.get("status")
     market_score = numeric_value(entry.get("market_score"))
-    last_checked = sort_timestamp(entry.get("social_last_checked_at"))
-    created_at = sort_timestamp(entry.get("created_at_utc") or entry.get("discovered_at_utc"))
     created_sort = timestamp_sort_value(entry.get("created_at_utc") or entry.get("discovered_at_utc"))
-
-    if status == STATUS_ATIVO:
-        return (0, last_checked, -market_score, created_at)
-
-    return (1, -market_score, tuple(-item for item in created_sort))
+    monitoring_active = is_monitoring_active(entry)
+    return (0 if monitoring_active else 1, -market_score, tuple(-item for item in created_sort))
 
 
 def limit_social_candidates(candidates, config):
@@ -608,9 +604,32 @@ def is_social_eligibility_blocked(entry):
     return entry.get("social_eligibility") == SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET
 
 
-def social_query_skip_reason(entry, config):
+def social_age_minutes(entry, current_time):
+    for field in ["minimum_token_age_inferred_minutes", "oldest_pair_age_minutes"]:
+        age = numeric_or_none(entry.get(field))
+        if age is not None:
+            return age
+
+    for field in [
+        "selected_pair_created_at_utc",
+        "token_created_at_utc",
+        "created_at_utc",
+        "discovered_at_utc",
+    ]:
+        created_at = parse_iso(entry.get(field))
+        if created_at:
+            return max(0, (current_time - created_at).total_seconds() / 60)
+
+    return None
+
+
+def is_monitoring_active(entry):
+    return entry.get("status") == STATUS_ATIVO or entry.get("social_status") == SOCIAL_STATUS_ATIVO
+
+
+def social_query_skip_reason(entry, config, current_time=None):
     required_eligibility = config.get("require_social_eligibility")
-    monitoring_active = entry.get("status") == STATUS_ATIVO or entry.get("social_status") == SOCIAL_STATUS_ATIVO
+    monitoring_active = is_monitoring_active(entry)
     if required_eligibility and entry.get("social_eligibility") != required_eligibility and not monitoring_active:
         if is_social_eligibility_blocked(entry):
             return SOCIAL_SKIP_REASON_OLD_MARKET
@@ -619,6 +638,12 @@ def social_query_skip_reason(entry, config):
     if config.get("require_numeric_market_score", True):
         if numeric_or_none(entry.get("market_score")) is None:
             return SOCIAL_SKIP_REASON_MISSING_MARKET_SCORE
+
+    min_age = int(config.get("min_social_age_minutes") or 0)
+    if min_age > 0 and not monitoring_active and current_time is not None:
+        age = social_age_minutes(entry, current_time)
+        if age is None or age < min_age:
+            return SOCIAL_SKIP_REASON_TOO_YOUNG
 
     return None
 
@@ -1675,6 +1700,7 @@ def print_summary(snapshot):
         f"Tokens expirados: {snapshot['tokens_expired']}",
         f"Tokens bloqueados pelo limite diario: {snapshot.get('tokens_blocked_by_daily_limit', 0)}",
         f"Tokens bloqueados pelo orcamento de posts: {snapshot.get('tokens_blocked_by_post_budget', 0)}",
+        f"Tokens bloqueados por idade social minima: {snapshot.get('tokens_blocked_by_min_social_age', 0)}",
         f"Tokens bloqueados por social_eligibility: {snapshot.get('tokens_blocked_by_social_eligibility', 0)}",
         f"Tokens bloqueados por market_score: {snapshot.get('tokens_blocked_by_market_score', 0)}",
         f"Posts retornados no dia social: {snapshot.get('posts_returned_today', 0)}",
@@ -1710,6 +1736,7 @@ def run_cycle(config_file=CONFIG_FILE):
             "tokens_blocked_by_daily_limit": 0,
             "tokens_blocked_by_post_budget": 0,
             "tokens_blocked_by_social_eligibility": 0,
+            "tokens_blocked_by_min_social_age": 0,
             "tokens_blocked_by_market_score": 0,
             "posts_returned_today": 0,
             "wake_window_active": False,
@@ -1733,6 +1760,7 @@ def run_cycle(config_file=CONFIG_FILE):
             "tokens_blocked_by_daily_limit": 0,
             "tokens_blocked_by_post_budget": 0,
             "tokens_blocked_by_social_eligibility": 0,
+            "tokens_blocked_by_min_social_age": 0,
             "tokens_blocked_by_market_score": 0,
             "posts_returned_today": int(daily_usage.get("posts_returned") or 0),
             "post_budget": budget,
@@ -1758,6 +1786,7 @@ def run_cycle(config_file=CONFIG_FILE):
             "tokens_blocked_by_daily_limit": 0,
             "tokens_blocked_by_post_budget": 0,
             "tokens_blocked_by_social_eligibility": 0,
+            "tokens_blocked_by_min_social_age": 0,
             "tokens_blocked_by_market_score": 0,
             "posts_returned_today": 0,
             "wake_window_active": True,
@@ -1779,6 +1808,7 @@ def run_cycle(config_file=CONFIG_FILE):
     tokens_blocked_by_daily_limit = 0
     tokens_blocked_by_post_budget = 0
     tokens_blocked_by_social_eligibility = 0
+    tokens_blocked_by_min_social_age = 0
     tokens_blocked_by_market_score = 0
     with watchlist_lock():
         watchlist = load_watchlist(WATCHLIST_FILE)
@@ -1804,7 +1834,7 @@ def run_cycle(config_file=CONFIG_FILE):
                 append_jsonl(DATA_DIR / f"social_inference_{date_stamp}.jsonl", history_record)
                 continue
 
-            skip_reason = social_query_skip_reason(entry, config)
+            skip_reason = social_query_skip_reason(entry, config, current_time=current_time)
             if not skip_reason:
                 eligible_social_candidates.append(candidate)
                 continue
@@ -1813,6 +1843,8 @@ def run_cycle(config_file=CONFIG_FILE):
             entry["social_skip_reason"] = skip_reason
             if skip_reason == SOCIAL_SKIP_REASON_MISSING_MARKET_SCORE:
                 tokens_blocked_by_market_score += 1
+            elif skip_reason == SOCIAL_SKIP_REASON_TOO_YOUNG:
+                tokens_blocked_by_min_social_age += 1
             else:
                 tokens_blocked_by_social_eligibility += 1
 
@@ -1972,6 +2004,7 @@ def run_cycle(config_file=CONFIG_FILE):
         "tokens_blocked_by_daily_limit": tokens_blocked_by_daily_limit,
         "tokens_blocked_by_post_budget": tokens_blocked_by_post_budget,
         "tokens_blocked_by_social_eligibility": tokens_blocked_by_social_eligibility,
+        "tokens_blocked_by_min_social_age": tokens_blocked_by_min_social_age,
         "tokens_blocked_by_market_score": tokens_blocked_by_market_score,
         "posts_returned_today": int(daily_usage.get("posts_returned") or 0),
         "post_budget": bucket_state(local_time, config, daily_usage),

@@ -41,6 +41,7 @@ class WatchlistRankingTests(unittest.TestCase):
                 "status": "novo",
                 "social_eligibility": "eligible",
                 "market_score": 90,
+                "minimum_token_age_inferred_minutes": 45,
             },
             "ethereum:0x3333333333333333333333333333333333333333": {
                 "chain": "ethereum",
@@ -77,6 +78,7 @@ class WatchlistRankingTests(unittest.TestCase):
                 "status": "novo",
                 "social_eligibility": "eligible",
                 "market_score": 10,
+                "minimum_token_age_inferred_minutes": 45,
             },
             "ethereum:0x2222222222222222222222222222222222222222": {
                 "chain": "ethereum",

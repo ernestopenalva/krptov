@@ -264,12 +264,61 @@ class TelegramNotifierTests(unittest.TestCase):
         message = telegram_notifier.build_alert_message(alert, {})
 
         self.assertNotIn("<b>Endereco:</b>", message)
-        self.assertIn("autor com boa audiência (7.528 seguidores)", message)
+        self.assertIn(
+            'autor com boa audiência <a href="https://x.com/BlackhatEmpire">@BlackhatEmpire</a> '
+            "(7.528 seguidores)",
+            message,
+        )
+        self.assertIn(
+            '<b>Autor:</b> <a href="https://x.com/BlackhatEmpire">@BlackhatEmpire</a>',
+            message,
+        )
+        self.assertNotIn("<b>Seguidores:</b>", message)
+        self.assertNotIn("Maior audiência no resultado", message)
         self.assertIn(
             f"<b>GMGN:</b> https://gmgn.ai/eth/token/{token_address}",
             message,
         )
         self.assertIn(f"<b>Endereco completo:</b> <code>{token_address}</code>", message)
+
+    def test_alert_message_uses_readable_affiliation_from_best_author(self):
+        alert = {
+            "alert_rank": 100,
+            "chain_id": "base",
+            "token_address": "0xb8c02cc0682832c86a21e26f1d1de80b51255ba3",
+            "alert_reasons": ["author_affiliation_found", "author_followers_high>=25887"],
+            "author_username": "meligamble",
+            "author_followers": 7161,
+            "author_affiliation_found": True,
+            "author_affiliation_id": ["1329466321919217665"],
+            "best_followers_author_summary": {
+                "username": "NeoCallss",
+                "followers": 25887,
+            },
+            "best_affiliation_author_summary": {
+                "username": "NeoCallss",
+                "followers": 25887,
+                "affiliation_found": True,
+                "affiliation_name": "Sigma",
+                "affiliation_username": "SigmaTrading",
+            },
+            "trigger_posts": [{"url": "https://x.com/meligamble/status/1", "author_username": "meligamble"}],
+        }
+
+        message = telegram_notifier.build_alert_message(alert, {"token_symbol": "Bertie", "quote_token": "WETH"})
+
+        self.assertIn(
+            'autor com grande audiência <a href="https://x.com/NeoCallss">@NeoCallss</a> '
+            "(25.887 seguidores)",
+            message,
+        )
+        self.assertIn(
+            '<b>Afiliação:</b> Sigma (<a href="https://x.com/SigmaTrading">@SigmaTrading</a>)',
+            message,
+        )
+        self.assertNotIn("id=", message)
+        self.assertNotIn("<b>Seguidores:</b>", message)
+        self.assertNotIn("Maior audiência no resultado", message)
 
 
 class SocialInferenceTelegramTests(unittest.TestCase):
@@ -300,6 +349,7 @@ class SocialInferenceTelegramTests(unittest.TestCase):
                             "monitor_status": "pendente",
                             "social_eligibility": "eligible",
                             "market_score": 80,
+                            "minimum_token_age_inferred_minutes": 30,
                             "telegram_alert_sent": False,
                         }
                     }

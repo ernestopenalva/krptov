@@ -30,11 +30,13 @@ def load_watchlist(path=WATCHLIST_FILE):
     return payload
 
 
-def load_max_social_checks(path=CONFIG_FILE, default=5):
+def load_social_settings(path=CONFIG_FILE, default_checks=3, default_min_age=30):
     if not path.exists():
-        return default
+        return default_checks, default_min_age
 
     in_social = False
+    max_checks = default_checks
+    min_age = default_min_age
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         stripped = raw_line.split("#", 1)[0].strip()
         if not stripped:
@@ -45,11 +47,17 @@ def load_max_social_checks(path=CONFIG_FILE, default=5):
         if in_social and stripped.startswith("max_social_checks_per_token:"):
             _, value = stripped.split(":", 1)
             try:
-                return int(value.strip().strip('"').strip("'"))
+                max_checks = int(value.strip().strip('"').strip("'"))
             except ValueError:
-                return default
+                max_checks = default_checks
+        if in_social and stripped.startswith("min_social_age_minutes:"):
+            _, value = stripped.split(":", 1)
+            try:
+                min_age = int(value.strip().strip('"').strip("'"))
+            except ValueError:
+                min_age = default_min_age
 
-    return default
+    return max_checks, min_age
 
 
 def numeric_or_none(value):
@@ -230,7 +238,7 @@ def normalize_entry(key, entry):
     }
 
 
-def social_ready(entry):
+def social_ready(entry, min_social_age_minutes=30):
     if entry.get("social_status") == "concluido":
         return False
 
@@ -238,14 +246,23 @@ def social_ready(entry):
         entry.get("social_status") == "ativo"
         or (entry["status"] == "ativo" and entry.get("social_status") in {"-", "pendente"})
     )
+    age_ready = (
+        monitoring_active
+        or min_social_age_minutes <= 0
+        or (
+            entry["minimum_token_age_inferred_minutes"] is not None
+            and entry["minimum_token_age_inferred_minutes"] >= min_social_age_minutes
+        )
+    )
     return (
         entry["status"] in {"novo", "ativo"}
         and (entry["social_eligibility"] == "eligible" or monitoring_active)
         and entry["market_score"] is not None
+        and age_ready
     )
 
 
-def filter_entries(entries, args):
+def filter_entries(entries, args, min_social_age_minutes=30):
     filtered = []
 
     for entry in entries:
@@ -253,17 +270,17 @@ def filter_entries(entries, args):
             continue
         if args.source and entry["source"] != args.source:
             continue
-        if args.eligible_only and not social_ready(entry):
+        if args.eligible_only and not social_ready(entry, min_social_age_minutes=min_social_age_minutes):
             continue
         filtered.append(entry)
 
     return filtered
 
 
-def ranking_sort_key(entry):
+def ranking_sort_key(entry, min_social_age_minutes=30):
     score = entry["market_score"]
     score_value = score if score is not None else -1
-    eligible_rank = 1 if social_ready(entry) else 0
+    eligible_rank = 1 if social_ready(entry, min_social_age_minutes=min_social_age_minutes) else 0
     return (eligible_rank, score_value, entry["last_seen_at_utc"])
 
 
@@ -273,8 +290,9 @@ def ranked_entries(watchlist, args):
         for key, entry in watchlist.items()
     ]
     entries = [entry for entry in entries if entry]
-    entries = filter_entries(entries, args)
-    entries.sort(key=ranking_sort_key, reverse=True)
+    _, min_social_age_minutes = load_social_settings()
+    entries = filter_entries(entries, args, min_social_age_minutes=min_social_age_minutes)
+    entries.sort(key=lambda entry: ranking_sort_key(entry, min_social_age_minutes=min_social_age_minutes), reverse=True)
     return entries
 
 
@@ -381,13 +399,16 @@ def print_table(rows, width=None):
 
 
 def print_summary(watchlist, entries, args, previous_positions):
-    max_social_checks = load_max_social_checks()
+    max_social_checks, min_social_age_minutes = load_social_settings()
     all_entries = [
         normalize_entry(key, entry)
         for key, entry in watchlist.items()
     ]
     all_entries = [entry for entry in all_entries if entry]
-    social_candidates = [entry for entry in all_entries if social_ready(entry)]
+    social_candidates = [
+        entry for entry in all_entries
+        if social_ready(entry, min_social_age_minutes=min_social_age_minutes)
+    ]
     social_active = [entry for entry in all_entries if entry["social_status"] == "ativo"]
     social_done = [entry for entry in all_entries if entry["social_status"] == "concluido"]
 
@@ -396,6 +417,7 @@ def print_summary(watchlist, entries, args, previous_positions):
     print(f"WL total: {len(all_entries)}")
     print(f"Visiveis no filtro: {len(entries)}")
     print(f"Candidatos social: {len(social_candidates)}")
+    print(f"Idade minima social: {min_social_age_minutes}m")
     print(f"Por chain: {dict(Counter(entry['chain'] for entry in all_entries))}")
     print(f"Status WL: {dict(Counter(entry['status'] for entry in all_entries))}")
     print(f"Status social: {dict(Counter(entry['social_status'] for entry in all_entries))}")

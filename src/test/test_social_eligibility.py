@@ -54,6 +54,71 @@ class FakeDexscreenerSession:
 
 
 class SocialEligibilityTests(unittest.TestCase):
+    def test_social_inference_waits_for_minimum_age_before_starting_new_token(self):
+        current_time = datetime(2026, 6, 12, 12, 0, 0)
+        config = {
+            **social_inference.DEFAULT_CONFIG,
+            "min_social_age_minutes": 30,
+        }
+
+        young_entry = {
+            "status": "novo",
+            "social_status": "pendente",
+            "social_eligibility": "eligible",
+            "market_score": 90,
+            "minimum_token_age_inferred_minutes": 10,
+        }
+        mature_entry = {
+            "status": "novo",
+            "social_status": "pendente",
+            "social_eligibility": "eligible",
+            "market_score": 90,
+            "minimum_token_age_inferred_minutes": 30,
+        }
+        active_entry = {
+            "status": "ativo",
+            "social_status": "ativo",
+            "social_eligibility": "eligible",
+            "market_score": 90,
+            "minimum_token_age_inferred_minutes": 10,
+        }
+
+        self.assertEqual(
+            social_inference.social_query_skip_reason(young_entry, config, current_time=current_time),
+            "social_age_too_young",
+        )
+        self.assertIsNone(
+            social_inference.social_query_skip_reason(mature_entry, config, current_time=current_time)
+        )
+        self.assertIsNone(
+            social_inference.social_query_skip_reason(active_entry, config, current_time=current_time)
+        )
+
+    def test_social_inference_finishes_active_observation_before_starting_new_token(self):
+        watchlist = {
+            "base:0x1111111111111111111111111111111111111111": {
+                "chain": "base",
+                "chain_id": "base",
+                "token_address": "0x1111111111111111111111111111111111111111",
+                "status": "ativo",
+                "social_status": "ativo",
+                "market_score": 60,
+            },
+            "base:0x2222222222222222222222222222222222222222": {
+                "chain": "base",
+                "chain_id": "base",
+                "token_address": "0x2222222222222222222222222222222222222222",
+                "status": "novo",
+                "social_status": "pendente",
+                "market_score": 90,
+            },
+        }
+
+        candidates = social_inference.build_social_candidates(watchlist, social_inference.DEFAULT_CONFIG)
+
+        self.assertEqual(candidates[0]["token_address"], "0x1111111111111111111111111111111111111111")
+        self.assertEqual(candidates[1]["token_address"], "0x2222222222222222222222222222222222222222")
+
     def test_ranker_blocks_social_when_oldest_pair_is_old(self):
         current_time = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
         old_pair_created_at = int(datetime(2026, 6, 3, 10, 0, 0, tzinfo=timezone.utc).timestamp() * 1000)

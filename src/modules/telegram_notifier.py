@@ -70,6 +70,20 @@ def format_number(value):
         return str(value)
 
 
+def x_profile_url(username):
+    username = str(username or "").strip().lstrip("@")
+    if not username or username == "indisponivel":
+        return None
+    return f"https://x.com/{username}"
+
+
+def format_x_user_link(username):
+    username = str(username or "").strip().lstrip("@")
+    if not username or username == "indisponivel":
+        return "@indisponivel"
+    return f'<a href="{escape_html(x_profile_url(username))}">@{escape_html(username)}</a>'
+
+
 def dexscreener_chain_slug(chain_id):
     if chain_id == "ethereum":
         return "ethereum"
@@ -129,13 +143,11 @@ def affiliation_label(alert, prefix="author"):
 
     name = alert.get(f"{prefix}_affiliation_name")
     username = alert.get(f"{prefix}_affiliation_username")
-    affiliation_id = alert.get(f"{prefix}_affiliation_id")
     raw = alert.get(f"{prefix}_affiliation_raw")
 
     if isinstance(raw, dict):
         name = name or raw.get("name") or raw.get("label")
         username = username or raw.get("username") or raw.get("screen_name") or raw.get("handle")
-        affiliation_id = affiliation_id or raw.get("id") or raw.get("user_id")
     elif isinstance(raw, str):
         name = name or raw
 
@@ -148,12 +160,102 @@ def affiliation_label(alert, prefix="author"):
         return str(name)
     if username:
         return f"@{username}"
-    if affiliation_id:
-        return f"id={affiliation_id}"
     return "presente"
 
 
-def format_alert_reason(reason):
+def summary_affiliation_label(summary):
+    if not isinstance(summary, dict) or not summary.get("affiliation_found"):
+        return None
+
+    name = summary.get("affiliation_name")
+    username = summary.get("affiliation_username")
+    raw = summary.get("affiliation_raw")
+
+    if isinstance(raw, dict):
+        name = name or raw.get("name") or raw.get("label")
+        username = username or raw.get("username") or raw.get("screen_name") or raw.get("handle")
+    elif isinstance(raw, str):
+        name = name or raw
+
+    if username:
+        username = str(username).lstrip("@")
+
+    if name and username:
+        return f"{name} (@{username})"
+    if name:
+        return str(name)
+    if username:
+        return f"@{username}"
+    return None
+
+
+def best_affiliation_label(alert):
+    label = affiliation_label(alert, "author")
+    if label and label != "presente":
+        return label
+
+    label = summary_affiliation_label(alert.get("best_affiliation_author_summary") or {})
+    if label:
+        return label
+
+    return "presente" if affiliation_label(alert, "author") else None
+
+
+def format_affiliation_html(label):
+    label = str(label or "").strip()
+    if not label:
+        return ""
+
+    match = None
+    if "(@" in label and label.endswith(")"):
+        prefix, username_part = label.rsplit("(@", 1)
+        username = username_part[:-1]
+        match = prefix.strip(), username.strip()
+
+    if match:
+        name, username = match
+        return f"{escape_html(name)} ({format_x_user_link(username)})"
+
+    if label.startswith("@"):
+        return format_x_user_link(label)
+
+    return escape_html(label)
+
+
+def reason_followers_value(reason):
+    if not str(reason or "").startswith("author_followers_") or ">=" not in str(reason):
+        return None
+    try:
+        return int(float(str(reason).split(">=", 1)[1]))
+    except (TypeError, ValueError):
+        return None
+
+
+def follower_reason_username(alert, followers):
+    if followers is None:
+        return None
+
+    candidates = [
+        {
+            "username": alert.get("author_username"),
+            "followers": alert.get("author_followers"),
+        },
+        alert.get("best_followers_author_summary") or {},
+        alert.get("selected_origin_summary") or {},
+        alert.get("best_affiliation_author_summary") or {},
+    ]
+    for candidate in candidates:
+        try:
+            candidate_followers = int(round(float(candidate.get("followers"))))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if candidate_followers == followers:
+            return candidate.get("username")
+    return None
+
+
+def format_alert_reason(reason, alert=None):
+    alert = alert or {}
     reason = str(reason or "").strip()
     if not reason:
         return None
@@ -161,16 +263,22 @@ def format_alert_reason(reason):
     if reason.startswith("author_followers_") and ">=" in reason:
         level, followers = reason.split(">=", 1)
         level = level.replace("author_followers_", "")
+        followers_value = reason_followers_value(reason)
         level_text = {
             "medium": "boa audiência",
             "high": "grande audiência",
             "critical": "audiência muito alta",
         }.get(level, "audiência relevante")
-        return f"autor com {level_text} ({format_number(followers)} seguidores)"
+        username = follower_reason_username(alert, followers_value)
+        if username:
+            return f"autor com {level_text} {format_x_user_link(username)} ({escape_html(format_number(followers))} seguidores)"
+        return f"autor com {level_text} ({escape_html(format_number(followers))} seguidores)"
 
     reason_labels = {
-        "author_verified_business": "autor com verificação empresarial",
-        "author_verified_government": "autor com verificação governamental",
+        "author_verified_business": "conta verificada como organização",
+        "verified_type_business": "conta verificada como organização",
+        "author_verified_government": "conta verificada como governo",
+        "verified_type_government": "conta verificada como governo",
         "author_affiliation": "autor afiliado a uma organização",
         "author_affiliation_found": "autor afiliado a uma organização",
         "automated_operator_detected": "post indica operador ou automação por trás do token",
@@ -178,32 +286,15 @@ def format_alert_reason(reason):
     if reason in reason_labels:
         return reason_labels[reason]
 
-    if reason.startswith("author_followers_") and ">=" in reason:
-        level, followers = reason.split(">=", 1)
-        level = level.replace("author_followers_", "")
-        level_text = {
-            "medium": "boa audiência",
-            "high": "grande audiência",
-            "critical": "audiência muito alta",
-        }.get(level, "audiência relevante")
-        return f"Autor com {level_text} ({format_number(followers)} seguidores)"
-
-    if reason == "author_verified_business":
-        return "Autor com verificação empresarial"
-    if reason == "author_verified_government":
-        return "Autor com verificação governamental"
-    if reason == "author_affiliation":
-        return "Autor vinculado a uma organização"
-    if reason == "automated_operator_detected":
-        return "Post indica operador ou automação por trás do token"
-
-    return reason.replace("_", " ")
+    return escape_html(reason.replace("_", " "))
 
 
-def format_alert_reasons(reasons):
-    formatted = [format_alert_reason(reason) for reason in (reasons or [])]
+def format_alert_reasons(reasons, alert=None):
+    formatted = [format_alert_reason(reason, alert=alert) for reason in (reasons or [])]
     formatted = [reason for reason in formatted if reason]
-    return "; ".join(formatted) if formatted else "nenhum"
+    if not formatted:
+        return "nenhum"
+    return "\n" + "\n".join(f"- {reason}" for reason in formatted)
 
 
 def first_trigger_post(alert):
@@ -222,38 +313,25 @@ def build_alert_message(alert, entry=None):
     token_address = alert.get("token_address") or entry.get("token_address")
     pair_label = token_pair_label(entry, chain_id)
     reasons = alert.get("alert_reasons") or []
-    reason_text = format_alert_reasons(reasons)
+    reason_text = format_alert_reasons(reasons, alert=alert)
     author = alert.get("author_username") or trigger_post.get("author_username") or "indisponivel"
-    followers = alert.get("author_followers") or alert.get("best_author_followers")
     gmgn_url = build_gmgn_url(chain_id, token_address)
     post_url = trigger_post.get("url")
-    affiliation = affiliation_label(alert, "author")
-    best_followers = alert.get("best_followers_author_summary") or {}
+    affiliation = best_affiliation_label(alert)
 
     lines = [
         "<b>KRPTO-V | Alerta social</b>",
         f"<b>Rank:</b> {escape_html(alert.get('alert_rank', 'indisponivel'))}",
         f"<b>Token:</b> {escape_html(pair_label)}",
         f"<b>Chain:</b> {escape_html(chain_id)}",
-        f"<b>Motivos:</b> {escape_html(reason_text)}",
-        f"<b>Autor:</b> @{escape_html(author)}",
-        f"<b>Seguidores:</b> {escape_html(format_number(followers))}",
+        f"<b>Motivos:</b>{reason_text}",
+        f"<b>Autor:</b> {format_x_user_link(author)}",
     ]
 
     if affiliation:
-        lines.append(f"<b>Afiliação:</b> {escape_html(affiliation)}")
-    if (
-        best_followers.get("username")
-        and best_followers.get("username") != author
-        and best_followers.get("followers") is not None
-    ):
-        lines.append(
-            "<b>Maior audiência no resultado:</b> "
-            f"@{escape_html(best_followers.get('username'))} "
-            f"({escape_html(format_number(best_followers.get('followers')))} seguidores)"
-        )
+        lines.append(f"<b>Afiliação:</b> {format_affiliation_html(affiliation)}")
     if alert.get("automated_operator_username"):
-        lines.append(f"<b>Operador:</b> @{escape_html(alert.get('automated_operator_username'))}")
+        lines.append(f"<b>Operador:</b> {format_x_user_link(alert.get('automated_operator_username'))}")
     if post_url:
         lines.append(f"<b>Post:</b> {escape_html(post_url)}")
     if gmgn_url:
