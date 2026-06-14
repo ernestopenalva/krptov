@@ -884,10 +884,10 @@ def calculate_social_eligibility(selected_pair, inferred_age, current_time, conf
             **inferred_age,
         }
 
-    max_pool_age_minutes = float(
-        config.get("max_pool_age_minutes")
-        or SOCIAL_ELIGIBILITY_MAX_MARKET_AGE_HOURS * 60
-    )
+    configured_max_age = config.get("max_pool_age_minutes")
+    if configured_max_age is None:
+        configured_max_age = DEFAULT_CONFIG["market_ranker"]["social_eligibility"]["max_pool_age_minutes"]
+    max_pool_age_minutes = float(configured_max_age)
     if age_minutes > max_pool_age_minutes:
         return {
             "social_eligibility": SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET,

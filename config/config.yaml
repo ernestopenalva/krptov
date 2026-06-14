@@ -26,6 +26,7 @@ social_inference:
   max_new_tokens_per_cycle: 0
   max_social_checks_per_token: 3
   min_social_age_minutes: 30
+  min_quote_liquidity_usd: 1
   prioritize_market_score: true
 
   wake_window:

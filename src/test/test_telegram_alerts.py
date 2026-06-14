@@ -351,6 +351,37 @@ class TelegramNotifierTests(unittest.TestCase):
         )
         self.assertNotIn("<b>Afiliação:</b> presente", message)
 
+    def test_alert_message_lists_up_to_three_strong_authors(self):
+        alert = {
+            "alert_rank": 40,
+            "chain_id": "ethereum",
+            "token_address": "0x74744bda330834318543de9c629041611fd04b83",
+            "alert_reasons": [
+                "author_followers_high>=23767",
+                "author_followers_high>=27703",
+                "author_followers_medium>=3000",
+                "author_followers_critical>=150000",
+            ],
+            "author_username": "oybull",
+            "author_followers": 27703,
+            "top_followers_author_summaries": [
+                {"username": "critical", "followers": 150000, "reasons": ["author_followers_critical>=150000"]},
+                {"username": "oybull", "followers": 27703, "reasons": ["author_followers_high>=27703"]},
+                {"username": "second", "followers": 23767, "reasons": ["author_followers_high>=23767"]},
+                {"username": "fourth", "followers": 3000, "reasons": ["author_followers_medium>=3000"]},
+            ],
+            "trigger_posts": [{"url": "https://x.com/oybull/status/1", "author_username": "oybull"}],
+        }
+
+        message = telegram_notifier.build_alert_message(alert, {})
+
+        self.assertIn("autor com audiência muito alta", message)
+        self.assertIn("@critical", message)
+        self.assertIn("@oybull", message)
+        self.assertIn("@second", message)
+        self.assertNotIn("@fourth", message)
+        self.assertNotIn("23.767 seguidores)\n- autor com grande audiência (27.703", message)
+
 
 class SocialInferenceTelegramTests(unittest.TestCase):
     def run_social_cycle(self, root, send_alert_mock, analysis=None):
@@ -380,6 +411,7 @@ class SocialInferenceTelegramTests(unittest.TestCase):
                             "monitor_status": "pendente",
                             "social_eligibility": "eligible",
                             "market_score": 80,
+                            "quote_liquidity_usd": 1000,
                             "minimum_token_age_inferred_minutes": 30,
                             "telegram_alert_sent": False,
                         }

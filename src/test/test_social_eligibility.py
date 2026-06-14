@@ -66,6 +66,7 @@ class SocialEligibilityTests(unittest.TestCase):
             "social_status": "pendente",
             "social_eligibility": "eligible",
             "market_score": 90,
+            "quote_liquidity_usd": 1000,
             "minimum_token_age_inferred_minutes": 10,
         }
         mature_entry = {
@@ -73,6 +74,7 @@ class SocialEligibilityTests(unittest.TestCase):
             "social_status": "pendente",
             "social_eligibility": "eligible",
             "market_score": 90,
+            "quote_liquidity_usd": 1000,
             "minimum_token_age_inferred_minutes": 30,
         }
         active_entry = {
@@ -80,6 +82,7 @@ class SocialEligibilityTests(unittest.TestCase):
             "social_status": "ativo",
             "social_eligibility": "eligible",
             "market_score": 90,
+            "quote_liquidity_usd": 1000,
             "minimum_token_age_inferred_minutes": 10,
         }
 
@@ -93,6 +96,55 @@ class SocialEligibilityTests(unittest.TestCase):
         self.assertIsNone(
             social_inference.social_query_skip_reason(active_entry, config, current_time=current_time)
         )
+
+    def test_social_inference_blocks_missing_or_zero_quote_liquidity(self):
+        current_time = datetime(2026, 6, 12, 12, 0, 0)
+        config = {
+            **social_inference.DEFAULT_CONFIG,
+            "min_quote_liquidity_usd": 1,
+        }
+        base_entry = {
+            "status": "novo",
+            "social_status": "pendente",
+            "social_eligibility": "eligible",
+            "market_score": 90,
+            "minimum_token_age_inferred_minutes": 30,
+        }
+
+        self.assertEqual(
+            social_inference.social_query_skip_reason(base_entry, config, current_time=current_time),
+            "low_quote_liquidity",
+        )
+
+        base_entry["quote_liquidity_usd"] = 0
+        self.assertEqual(
+            social_inference.social_query_skip_reason(base_entry, config, current_time=current_time),
+            "low_quote_liquidity",
+        )
+
+        base_entry["quote_liquidity_usd"] = 1
+        self.assertIsNone(
+            social_inference.social_query_skip_reason(base_entry, config, current_time=current_time)
+        )
+
+    def test_social_usage_counts_unique_posts_for_budget(self):
+        current_time = datetime(2026, 6, 12, 12, 0, 0)
+        usage = {
+            "date": "2026-06-12",
+            "posts_returned": 0,
+            "posts_returned_raw": 0,
+            "seen_tweet_ids": [],
+            "checks": 0,
+        }
+        payload = {"data": [{"id": "100"}, {"id": "101"}]}
+
+        social_inference.register_social_check_usage("0x1", current_time, usage, payload)
+        social_inference.register_social_check_usage("0x1", current_time, usage, payload)
+        social_inference.register_social_check_usage("0x1", current_time, usage, {"data": [{"id": "101"}, {"id": "102"}]})
+
+        self.assertEqual(usage["posts_returned"], 3)
+        self.assertEqual(usage["posts_returned_raw"], 6)
+        self.assertEqual(usage["seen_tweet_ids"], ["100", "101", "102"])
 
     def test_social_inference_finishes_active_observation_before_starting_new_token(self):
         watchlist = {
@@ -342,6 +394,7 @@ class SocialEligibilityTests(unittest.TestCase):
                             "social_status": "ativo",
                             "monitor_status": "pendente",
                             "market_score": 75,
+                            "quote_liquidity_usd": 1000,
                             "social_eligibility": "blocked_old_market",
                             "social_eligibility_reason": "old_market",
                             "social_monitoring_started_at": "2026-06-05T12:00:00",

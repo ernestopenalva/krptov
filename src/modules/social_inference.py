@@ -38,9 +38,11 @@ SOCIAL_SKIP_REASON_NOT_ELIGIBLE = "social_eligibility_not_eligible"
 SOCIAL_SKIP_REASON_MISSING_MARKET_SCORE = "missing_numeric_market_score"
 SOCIAL_SKIP_REASON_POST_BUDGET = "post_budget_limit"
 SOCIAL_SKIP_REASON_TOO_YOUNG = "social_age_too_young"
+SOCIAL_SKIP_REASON_LOW_QUOTE_LIQUIDITY = "low_quote_liquidity"
 SOCIAL_COMPLETED_REASON_ALERT_SENT = "alert_sent"
 SOCIAL_COMPLETED_REASON_MAX_CHECKS = "max_social_checks"
 SOCIAL_COMPLETED_REASON_SOCIAL_TIMEOUT = "social_timeout"
+SOCIAL_COMPLETED_REASON_LOW_QUOTE_LIQUIDITY = "low_quote_liquidity"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
@@ -77,6 +79,7 @@ DEFAULT_CONFIG = {
     },
     "max_social_checks_per_token": 3,
     "min_social_age_minutes": 30,
+    "min_quote_liquidity_usd": 1,
     "prioritize_market_score": True,
     "require_social_eligibility": SOCIAL_ELIGIBILITY_ELIGIBLE,
     "require_numeric_market_score": True,
@@ -376,6 +379,8 @@ def atomic_save_json(path, payload):
 
     with temp_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
 
     os.replace(temp_path, path)
 
@@ -630,6 +635,8 @@ def is_monitoring_active(entry):
 def social_query_skip_reason(entry, config, current_time=None):
     required_eligibility = config.get("require_social_eligibility")
     monitoring_active = is_monitoring_active(entry)
+    # Once social monitoring has started, finish the short observation window
+    # even if the ranker later changes market eligibility or the token ages out.
     if required_eligibility and entry.get("social_eligibility") != required_eligibility and not monitoring_active:
         if is_social_eligibility_blocked(entry):
             return SOCIAL_SKIP_REASON_OLD_MARKET
@@ -638,6 +645,12 @@ def social_query_skip_reason(entry, config, current_time=None):
     if config.get("require_numeric_market_score", True):
         if numeric_or_none(entry.get("market_score")) is None:
             return SOCIAL_SKIP_REASON_MISSING_MARKET_SCORE
+
+    min_quote_liquidity = numeric_or_none(config.get("min_quote_liquidity_usd"))
+    if min_quote_liquidity is not None and min_quote_liquidity > 0:
+        quote_liquidity = numeric_or_none(entry.get("quote_liquidity_usd"))
+        if quote_liquidity is None or quote_liquidity < min_quote_liquidity:
+            return SOCIAL_SKIP_REASON_LOW_QUOTE_LIQUIDITY
 
     min_age = int(config.get("min_social_age_minutes") or 0)
     if min_age > 0 and not monitoring_active and current_time is not None:
@@ -1154,6 +1167,7 @@ def build_social_analysis(response_payload, config, bearer_token=None):
     best_author_followers = 0
     origin_summary = empty_origin_summary()
     best_followers_author_summary = None
+    top_followers_author_summaries = []
     best_affiliation_author_summary = None
     trigger_posts = []
 
@@ -1171,6 +1185,17 @@ def build_social_analysis(response_payload, config, bearer_token=None):
             continue
 
         user_rank, user_reasons = relevant_profile_signal(user, config, "author")
+        follower_reasons = [
+            reason
+            for reason in user_reasons
+            if str(reason).startswith("author_followers_")
+        ]
+        if follower_reasons:
+            user_summary = build_user_summary(user)
+            user_summary["rank"] = user_rank
+            user_summary["reasons"] = follower_reasons
+            top_followers_author_summaries.append(user_summary)
+
         if user_rank > alert_rank:
             origin_summary = build_origin_summary(user)
         alert_rank = max(alert_rank, user_rank)
@@ -1223,6 +1248,12 @@ def build_social_analysis(response_payload, config, bearer_token=None):
     if alert_rank > 0:
         alert_signature = "|".join(sorted(set(alert_reasons)))
 
+    top_followers_author_summaries = sorted(
+        top_followers_author_summaries,
+        key=lambda summary: int(summary.get("followers") or 0),
+        reverse=True,
+    )[:3]
+
     return {
         "tweets": tweets,
         "users": users,
@@ -1237,6 +1268,7 @@ def build_social_analysis(response_payload, config, bearer_token=None):
         "origin_summary": origin_summary,
         "selected_origin_summary": origin_summary,
         "best_followers_author_summary": best_followers_author_summary,
+        "top_followers_author_summaries": top_followers_author_summaries,
         "best_affiliation_author_summary": best_affiliation_author_summary,
         "trigger_posts": trigger_posts[:3],
         "alert_rank": alert_rank,
@@ -1357,6 +1389,15 @@ def finish_after_max_checks(entry, current_time):
     )
 
 
+def finish_after_low_quote_liquidity(entry, current_time):
+    complete_social_monitoring(
+        entry,
+        current_time,
+        SOCIAL_COMPLETED_REASON_LOW_QUOTE_LIQUIDITY,
+        discard=True,
+    )
+
+
 def build_alert(
     token_address,
     entry,
@@ -1408,6 +1449,7 @@ def build_alert(
         "operator_affiliation_type": origin.get("operator_affiliation_type"),
         "selected_origin_summary": analysis.get("selected_origin_summary"),
         "best_followers_author_summary": analysis.get("best_followers_author_summary"),
+        "top_followers_author_summaries": analysis.get("top_followers_author_summaries") or [],
         "best_affiliation_author_summary": analysis.get("best_affiliation_author_summary"),
         "trigger_posts": analysis.get("trigger_posts") or [],
         "raw_alert_posts_file": raw_alert_posts_file,
@@ -1449,6 +1491,8 @@ def load_daily_usage(usage_date):
         "new_tokens_started": 0,
         "tokens_started": [],
         "posts_returned": 0,
+        "posts_returned_raw": 0,
+        "seen_tweet_ids": [],
         "checks": 0,
     }
 
@@ -1465,6 +1509,8 @@ def load_daily_usage(usage_date):
     loaded.setdefault("new_tokens_started", 0)
     loaded.setdefault("tokens_started", [])
     loaded.setdefault("posts_returned", 0)
+    loaded.setdefault("posts_returned_raw", 0)
+    loaded.setdefault("seen_tweet_ids", [])
     loaded.setdefault("checks", 0)
     return loaded
 
@@ -1493,8 +1539,22 @@ def register_new_social_token_started(token_address, current_time, usage, chain_
     )
 
 
-def register_social_check_usage(token_address, current_time, usage, posts_returned, chain_id=None, watchlist_key=None):
-    usage["posts_returned"] = int(usage.get("posts_returned") or 0) + int(posts_returned or 0)
+def register_social_check_usage(token_address, current_time, usage, response_payload, chain_id=None, watchlist_key=None):
+    posts_returned_raw = count_returned_posts(response_payload)
+    tweet_ids = get_tweet_ids(response_payload.get("data") or [])
+    seen_tweet_ids = {str(tweet_id) for tweet_id in (usage.get("seen_tweet_ids") or [])}
+    new_tweet_ids = [
+        str(tweet_id)
+        for tweet_id in tweet_ids
+        if str(tweet_id) not in seen_tweet_ids
+    ]
+
+    if new_tweet_ids:
+        seen_tweet_ids.update(new_tweet_ids)
+        usage["seen_tweet_ids"] = sorted(seen_tweet_ids)
+
+    usage["posts_returned"] = int(usage.get("posts_returned") or 0) + len(new_tweet_ids)
+    usage["posts_returned_raw"] = int(usage.get("posts_returned_raw") or 0) + posts_returned_raw
     usage["checks"] = int(usage.get("checks") or 0) + 1
     usage.setdefault("checks_log", []).append(
         {
@@ -1502,7 +1562,9 @@ def register_social_check_usage(token_address, current_time, usage, posts_return
             "chain_id": chain_id,
             "watchlist_key": watchlist_key,
             "checked_at": to_iso(current_time),
-            "posts_returned": int(posts_returned or 0),
+            "posts_returned": len(new_tweet_ids),
+            "posts_returned_raw": posts_returned_raw,
+            "new_tweet_ids": new_tweet_ids,
         }
     )
 
@@ -1683,6 +1745,7 @@ def empty_analysis():
         "origin_summary": empty_origin_summary(),
         "selected_origin_summary": empty_origin_summary(),
         "best_followers_author_summary": None,
+        "top_followers_author_summaries": [],
         "best_affiliation_author_summary": None,
         "trigger_posts": [],
         "alert_rank": 0,
@@ -1701,9 +1764,11 @@ def print_summary(snapshot):
         f"Tokens bloqueados pelo limite diario: {snapshot.get('tokens_blocked_by_daily_limit', 0)}",
         f"Tokens bloqueados pelo orcamento de posts: {snapshot.get('tokens_blocked_by_post_budget', 0)}",
         f"Tokens bloqueados por idade social minima: {snapshot.get('tokens_blocked_by_min_social_age', 0)}",
+        f"Tokens bloqueados por quote_liquidity: {snapshot.get('tokens_blocked_by_quote_liquidity', 0)}",
         f"Tokens bloqueados por social_eligibility: {snapshot.get('tokens_blocked_by_social_eligibility', 0)}",
         f"Tokens bloqueados por market_score: {snapshot.get('tokens_blocked_by_market_score', 0)}",
-        f"Posts retornados no dia social: {snapshot.get('posts_returned_today', 0)}",
+        f"Posts unicos no dia social: {snapshot.get('posts_returned_today', 0)}",
+        f"Posts brutos retornados no dia social: {snapshot.get('posts_returned_raw_today', 0)}",
         f"Janela social ativa: {snapshot.get('wake_window_active', True)}",
         f"Erros: {len(snapshot['errors'])}",
     ]
@@ -1737,8 +1802,10 @@ def run_cycle(config_file=CONFIG_FILE):
             "tokens_blocked_by_post_budget": 0,
             "tokens_blocked_by_social_eligibility": 0,
             "tokens_blocked_by_min_social_age": 0,
+            "tokens_blocked_by_quote_liquidity": 0,
             "tokens_blocked_by_market_score": 0,
             "posts_returned_today": 0,
+            "posts_returned_raw_today": 0,
             "wake_window_active": False,
             "usage_date": usage_date,
             "errors": [],
@@ -1761,8 +1828,10 @@ def run_cycle(config_file=CONFIG_FILE):
             "tokens_blocked_by_post_budget": 0,
             "tokens_blocked_by_social_eligibility": 0,
             "tokens_blocked_by_min_social_age": 0,
+            "tokens_blocked_by_quote_liquidity": 0,
             "tokens_blocked_by_market_score": 0,
             "posts_returned_today": int(daily_usage.get("posts_returned") or 0),
+            "posts_returned_raw_today": int(daily_usage.get("posts_returned_raw") or 0),
             "post_budget": budget,
             "wake_window_active": False,
             "usage_date": usage_date,
@@ -1787,8 +1856,10 @@ def run_cycle(config_file=CONFIG_FILE):
             "tokens_blocked_by_post_budget": 0,
             "tokens_blocked_by_social_eligibility": 0,
             "tokens_blocked_by_min_social_age": 0,
+            "tokens_blocked_by_quote_liquidity": 0,
             "tokens_blocked_by_market_score": 0,
             "posts_returned_today": 0,
+            "posts_returned_raw_today": 0,
             "wake_window_active": True,
             "usage_date": usage_date,
             "errors": [error],
@@ -1809,6 +1880,7 @@ def run_cycle(config_file=CONFIG_FILE):
     tokens_blocked_by_post_budget = 0
     tokens_blocked_by_social_eligibility = 0
     tokens_blocked_by_min_social_age = 0
+    tokens_blocked_by_quote_liquidity = 0
     tokens_blocked_by_market_score = 0
     with watchlist_lock():
         watchlist = load_watchlist(WATCHLIST_FILE)
@@ -1845,6 +1917,21 @@ def run_cycle(config_file=CONFIG_FILE):
                 tokens_blocked_by_market_score += 1
             elif skip_reason == SOCIAL_SKIP_REASON_TOO_YOUNG:
                 tokens_blocked_by_min_social_age += 1
+            elif skip_reason == SOCIAL_SKIP_REASON_LOW_QUOTE_LIQUIDITY:
+                tokens_blocked_by_quote_liquidity += 1
+                if is_monitoring_active(entry):
+                    status_before = entry.get("status")
+                    finish_after_low_quote_liquidity(entry, current_time)
+                    history_record = build_history_record(
+                        token_address=candidate["token_address"],
+                        status_before=status_before,
+                        entry=entry,
+                        analysis=empty_analysis(),
+                        alert_generated=False,
+                        current_time=current_time,
+                        watchlist_key=candidate["watchlist_key"],
+                    )
+                    append_jsonl(DATA_DIR / f"social_inference_{date_stamp}.jsonl", history_record)
             else:
                 tokens_blocked_by_social_eligibility += 1
 
@@ -1882,6 +1969,9 @@ def run_cycle(config_file=CONFIG_FILE):
                 if response is not None:
                     save_x_error(response, normalized_address, current_time, chain_id=chain_id)
                     errors.append(f"{normalized_address}: HTTP {response.status_code}")
+                    if response.status_code == 429:
+                        errors.append("X API 429: ciclo abortado para evitar novas tentativas em rate limit")
+                        break
                 else:
                     errors.append(f"{normalized_address}: HTTPError sem response")
                 continue
@@ -1907,7 +1997,7 @@ def run_cycle(config_file=CONFIG_FILE):
                 normalized_address,
                 current_time,
                 daily_usage,
-                posts_returned,
+                response_payload,
                 chain_id=chain_id,
                 watchlist_key=watchlist_key,
             )
@@ -2005,8 +2095,10 @@ def run_cycle(config_file=CONFIG_FILE):
         "tokens_blocked_by_post_budget": tokens_blocked_by_post_budget,
         "tokens_blocked_by_social_eligibility": tokens_blocked_by_social_eligibility,
         "tokens_blocked_by_min_social_age": tokens_blocked_by_min_social_age,
+        "tokens_blocked_by_quote_liquidity": tokens_blocked_by_quote_liquidity,
         "tokens_blocked_by_market_score": tokens_blocked_by_market_score,
         "posts_returned_today": int(daily_usage.get("posts_returned") or 0),
+        "posts_returned_raw_today": int(daily_usage.get("posts_returned_raw") or 0),
         "post_budget": bucket_state(local_time, config, daily_usage),
         "wake_window_active": True,
         "usage_date": usage_date,

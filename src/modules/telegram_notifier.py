@@ -269,6 +269,21 @@ def reason_followers_value(reason):
         return None
 
 
+def follower_reason_level(reason):
+    reason = str(reason or "")
+    if not reason.startswith("author_followers_") or ">=" not in reason:
+        return None
+    return reason.split(">=", 1)[0].replace("author_followers_", "")
+
+
+def follower_level_text(level):
+    return {
+        "medium": "boa audiência",
+        "high": "grande audiência",
+        "critical": "audiência muito alta",
+    }.get(level, "audiência relevante")
+
+
 def follower_reason_username(alert, followers):
     if followers is None:
         return None
@@ -290,6 +305,64 @@ def follower_reason_username(alert, followers):
         if candidate_followers == followers:
             return candidate.get("username")
     return None
+
+
+def follower_reason_lines(alert, limit=3):
+    alert = alert or {}
+    lines = []
+    seen_usernames = set()
+
+    for summary in alert.get("top_followers_author_summaries") or []:
+        if not isinstance(summary, dict):
+            continue
+        username = summary.get("username")
+        followers = summary.get("followers")
+        reasons = summary.get("reasons") or []
+        levels = [
+            follower_reason_level(reason)
+            for reason in reasons
+            if follower_reason_level(reason)
+        ]
+        level = "critical" if "critical" in levels else "high" if "high" in levels else "medium" if "medium" in levels else None
+        if not username or followers is None or not level:
+            continue
+        normalized = str(username).strip().lower().lstrip("@")
+        if normalized in seen_usernames:
+            continue
+        seen_usernames.add(normalized)
+        lines.append(
+            f"autor com {follower_level_text(level)} {format_x_user_link(username)} "
+            f"({escape_html(format_number(followers))} seguidores)"
+        )
+        if len(lines) >= limit:
+            return lines
+
+    follower_reasons = [
+        reason
+        for reason in (alert.get("alert_reasons") or [])
+        if str(reason).startswith("author_followers_")
+    ]
+    if not follower_reasons:
+        return lines
+
+    best_reason = max(
+        follower_reasons,
+        key=lambda reason: reason_followers_value(reason) or 0,
+    )
+    followers = reason_followers_value(best_reason)
+    level = follower_reason_level(best_reason)
+    username = follower_reason_username(alert, followers)
+    if username:
+        lines.append(
+            f"autor com {follower_level_text(level)} {format_x_user_link(username)} "
+            f"({escape_html(format_number(followers))} seguidores)"
+        )
+    elif followers is not None:
+        lines.append(
+            f"autor com {follower_level_text(level)} "
+            f"({escape_html(format_number(followers))} seguidores)"
+        )
+    return lines[:limit]
 
 
 def format_alert_reason(reason, alert=None):
@@ -332,7 +405,13 @@ def format_alert_reason(reason, alert=None):
 
 
 def format_alert_reasons(reasons, alert=None):
-    formatted = [format_alert_reason(reason, alert=alert) for reason in (reasons or [])]
+    follower_lines = follower_reason_lines(alert)
+    formatted = []
+    for reason in (reasons or []):
+        if str(reason).startswith("author_followers_") and follower_lines:
+            continue
+        formatted.append(format_alert_reason(reason, alert=alert))
+    formatted = follower_lines + formatted
     formatted = [reason for reason in formatted if reason]
     if not formatted:
         return "nenhum"
