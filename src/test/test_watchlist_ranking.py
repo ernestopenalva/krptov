@@ -70,9 +70,9 @@ class WatchlistRankingTests(unittest.TestCase):
         self.assertEqual(rows[0]["minimum_age"], "45m")
         self.assertIn(("ca", "CA", 42), watchlist_ranking.table_columns(width=160))
         self.assertNotIn(("sanity", "San", 3), watchlist_ranking.table_columns(width=160))
-        self.assertIn(("done", "Reas", 6), watchlist_ranking.table_columns(width=160))
+        self.assertNotIn(("done", "Reas", 6), watchlist_ranking.table_columns(width=160))
         self.assertNotIn(("ca", "CA", 42), watchlist_ranking.table_columns(width=80))
-        self.assertIn(("done", "Reas", 5), watchlist_ranking.table_columns(width=80))
+        self.assertNotIn(("done", "Reas", 5), watchlist_ranking.table_columns(width=80))
 
     def test_eligible_only_filters_social_candidates(self):
         watchlist = {
@@ -104,6 +104,31 @@ class WatchlistRankingTests(unittest.TestCase):
         self.assertEqual(watchlist_ranking.movement_marker("a", 1, previous), "up 2")
         self.assertEqual(watchlist_ranking.movement_marker("b", 2, previous), "down 1")
         self.assertEqual(watchlist_ranking.movement_marker("c", 4, previous), "new")
+
+    def test_social_completion_summary_counts_today_in_brasilia(self):
+        entries = [
+            {
+                "social_completed_reason": "alert_sent",
+                "social_monitoring_completed_at": "2026-06-15T03:30:00Z",
+            },
+            {
+                "social_completed_reason": "alert_sent",
+                "social_monitoring_completed_at": "2026-06-14T23:30:00Z",
+            },
+            {
+                "social_completed_reason": "max_social_checks",
+                "social_monitoring_completed_at": "2026-06-15T12:00:00-03:00",
+            },
+        ]
+
+        total, today = watchlist_ranking.social_completion_summary(
+            entries,
+            current_date=watchlist_ranking.datetime(2026, 6, 15).date(),
+        )
+
+        self.assertEqual(total["alert_sent"], 2)
+        self.assertEqual(today["alert_sent"], 1)
+        self.assertEqual(today["max_social_checks"], 1)
 
 
 if __name__ == "__main__":

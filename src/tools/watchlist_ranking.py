@@ -4,18 +4,40 @@ import os
 import shutil
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, time as datetime_time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WATCHLIST_FILE = PROJECT_ROOT / "data" / "watchlist.json"
 CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
 SOCIAL_LATEST_FILE = PROJECT_ROOT / "data" / "social_inference_latest.json"
+BRASILIA_TZ = ZoneInfo("America/Sao_Paulo")
 
 
-def utc_now_iso():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+def brt_now():
+    return datetime.now(BRASILIA_TZ)
+
+
+def parse_iso_datetime(value):
+    if not value:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=BRASILIA_TZ)
+    return parsed.astimezone(BRASILIA_TZ)
 
 
 def load_watchlist(path=WATCHLIST_FILE):
@@ -79,6 +101,40 @@ def load_social_settings(path=CONFIG_FILE, default_checks=3, default_min_age=30,
     return max_checks, min_age, min_quote_liquidity
 
 
+def load_wake_window_start(path=CONFIG_FILE, default_start="10:00"):
+    if not path.exists():
+        return default_start
+
+    in_social = False
+    in_wake_window = False
+    start = default_start
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw_line.split("#", 1)[0].strip()
+        if not stripped:
+            continue
+        if not raw_line.startswith(" ") and stripped.endswith(":"):
+            in_social = stripped[:-1] == "social_inference"
+            in_wake_window = False
+            continue
+        if in_social and raw_line.startswith("  ") and not raw_line.startswith("    ") and stripped.endswith(":"):
+            in_wake_window = stripped[:-1] == "wake_window"
+            continue
+        if in_social and in_wake_window and stripped.startswith("start:"):
+            _, value = stripped.split(":", 1)
+            start = value.strip().strip('"').strip("'")
+
+    return start
+
+
+def parse_hhmm(value, default="10:00"):
+    try:
+        hour_text, minute_text = str(value or default).split(":", 1)
+        return datetime_time(hour=int(hour_text), minute=int(minute_text))
+    except (TypeError, ValueError):
+        hour_text, minute_text = default.split(":", 1)
+        return datetime_time(hour=int(hour_text), minute=int(minute_text))
+
+
 def social_usage_file(usage_date):
     if not usage_date:
         return None
@@ -97,6 +153,7 @@ def load_post_budget_summary():
     bucket_target = int(budget.get("bucket_post_target") or 0)
     posts_allowed = int(budget.get("posts_allowed_so_far") or 0)
     bucket_index = budget.get("bucket_index")
+    bucket_minutes = int(budget.get("bucket_minutes") or 0)
 
     if not daily_budget and not bucket_target:
         return None
@@ -106,6 +163,16 @@ def load_post_budget_summary():
     if bucket_target:
         bucket_used = min(bucket_target, bucket_used)
 
+    next_bucket = None
+    if usage_date and bucket_minutes > 0 and bucket_index is not None:
+        try:
+            social_date = datetime.strptime(usage_date, "%Y-%m-%d").date()
+            start_time = parse_hhmm(load_wake_window_start())
+            window_start = datetime.combine(social_date, start_time, tzinfo=BRASILIA_TZ)
+            next_bucket = window_start + timedelta(minutes=(int(bucket_index) + 1) * bucket_minutes)
+        except (TypeError, ValueError):
+            next_bucket = None
+
     return {
         "usage_date": usage_date or "-",
         "posts_returned": posts_returned,
@@ -113,6 +180,7 @@ def load_post_budget_summary():
         "bucket_used": bucket_used,
         "bucket_target": bucket_target,
         "bucket_index": bucket_index,
+        "next_bucket": next_bucket.strftime("%H:%M") if next_bucket else "-",
     }
 
 
@@ -185,15 +253,6 @@ def display_name(entry):
     return short_address(entry["token_address"])
 
 
-def short_sanity(value):
-    mapping = {
-        "ok": "ok",
-        "misleading_liquidity": "mis",
-        "-": "-",
-    }
-    return mapping.get(value, str(value or "-"))
-
-
 def compact_chain(value):
     return {"ethereum": "eth", "base": "base", "bsc": "bsc"}.get(value, str(value or "-"))
 
@@ -240,18 +299,6 @@ def compact_age_source(value):
     return mapping.get(value, str(value or "-"))
 
 
-def compact_completed_reason(value):
-    mapping = {
-        "alert_sent": "alert",
-        "max_social_checks": "maxchk",
-        "social_timeout": "time",
-        "social_eligibility_blocked_old_market": "old_m",
-        None: "-",
-        "": "-",
-    }
-    return mapping.get(value, str(value or "-")[:6])
-
-
 def format_social_checks(value, max_checks):
     number = numeric_or_none(value)
     if number is None:
@@ -274,6 +321,7 @@ def normalize_entry(key, entry):
         "social_status": entry.get("social_status") or "-",
         "social_checks_count": numeric_or_none(entry.get("social_checks_count")),
         "social_completed_reason": entry.get("social_completed_reason") or "-",
+        "social_monitoring_completed_at": entry.get("social_monitoring_completed_at"),
         "social_last_posts_returned": numeric_or_none(entry.get("social_last_posts_returned")),
         "telegram_alert_sent": entry.get("telegram_alert_sent") is True,
         "social_eligibility": entry.get("social_eligibility") or "missing",
@@ -410,7 +458,6 @@ def table_rows(entries, previous_positions, top, max_social_checks=5):
                 "status": compact_status(entry["status"]),
                 "social_status": compact_status(entry["social_status"]),
                 "checks": format_social_checks(entry["social_checks_count"], max_social_checks),
-                "done": compact_completed_reason(entry["social_completed_reason"]),
                 "elig": compact_eligibility(entry["social_eligibility"]),
                 "minimum_age": format_age(entry["minimum_token_age_inferred_minutes"]),
                 "liq": format_money(entry["liquidity_usd"]),
@@ -441,7 +488,6 @@ def table_columns(width=None):
             ("status", "WL", 4),
             ("social_status", "Soc", 4),
             ("checks", "Chk", 4),
-            ("done", "Reas", 6),
             ("elig", "Elig", 5),
             ("minimum_age", "MinAg", 5),
             ("liq", "LiqDS", 8),
@@ -461,7 +507,6 @@ def table_columns(width=None):
         ("status", "WL", 4),
         ("social_status", "Soc", 4),
         ("checks", "Chk", 4),
-        ("done", "Reas", 5),
         ("elig", "Elig", 5),
         ("minimum_age", "MinA", 4),
         ("liq", "LiqDS", 6),
@@ -482,6 +527,25 @@ def print_table(rows, width=None):
         print(" ".join(str(row[key])[:width].ljust(width) for key, _, width in columns))
 
 
+def social_completion_summary(entries, current_date):
+    total = Counter(entry["social_completed_reason"] for entry in entries)
+    today = Counter()
+    for entry in entries:
+        completed_at = parse_iso_datetime(entry.get("social_monitoring_completed_at"))
+        if completed_at and completed_at.date() == current_date:
+            today[entry["social_completed_reason"]] += 1
+    return total, today
+
+
+def format_social_completion_summary(total, today):
+    if not total:
+        return "{}"
+    parts = []
+    for reason, count in total.items():
+        parts.append(f"'{reason}': {count} ({today.get(reason, 0)} hoje)")
+    return "{" + ", ".join(parts) + "}"
+
+
 def print_summary(watchlist, entries, args, previous_positions):
     max_social_checks, min_social_age_minutes, min_quote_liquidity_usd = load_social_settings()
     all_entries = [
@@ -500,9 +564,11 @@ def print_summary(watchlist, entries, args, previous_positions):
     social_active = [entry for entry in all_entries if entry["social_status"] == "ativo"]
     social_done = [entry for entry in all_entries if entry["social_status"] == "concluido"]
     post_budget = load_post_budget_summary()
+    current_brt = brt_now()
+    completion_total, completion_today = social_completion_summary(social_done, current_brt.date())
 
     print("=== KRPTO-V | Watchlist Ranking ===")
-    print(f"Atualizado: {utc_now_iso()}")
+    print(f"Atualizado: {current_brt.isoformat(timespec='seconds')}")
     print(f"WL total: {len(all_entries)}")
     print(f"Visiveis no filtro: {len(entries)} | Candidatos social: {len(social_candidates)}")
     print(f"Idade minima social: {min_social_age_minutes}m | QLiq minima social: US$ {min_quote_liquidity_usd:g}")
@@ -511,15 +577,15 @@ def print_summary(watchlist, entries, args, previous_positions):
         bucket_total = post_budget["bucket_target"] or "sem limite"
         print(
             f"Posts hoje: {post_budget['posts_returned']}/{daily_total} | "
-            f"Bucket: {post_budget['bucket_used']}/{bucket_total}"
+            f"Bucket: {post_budget['bucket_used']}/{bucket_total} | "
+            f"Proximo: {post_budget['next_bucket']}"
         )
     print(f"Por chain: {dict(Counter(entry['chain'] for entry in all_entries))}")
     print(f"Status WL: {dict(Counter(entry['status'] for entry in all_entries))}")
     print(f"Status social: {dict(Counter(entry['social_status'] for entry in all_entries))}")
     print(f"Social em observacao: {len(social_active)} | concluidos: {len(social_done)}")
-    print(f"Conclusao social: {dict(Counter(entry['social_completed_reason'] for entry in social_done))}")
+    print(f"Conclusao social na WL: {format_social_completion_summary(completion_total, completion_today)}")
     print(f"Social eligibility: {dict(Counter(entry['social_eligibility'] for entry in all_entries))}")
-    print(f"Market sanity: {dict(Counter(entry['market_sanity_status'] for entry in all_entries))}")
     if args.chain:
         print(f"Filtro chain: {args.chain}")
     if args.source:
