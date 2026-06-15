@@ -141,7 +141,27 @@ def social_usage_file(usage_date):
     return PROJECT_ROOT / "data" / f"social_inference_usage_{usage_date}.json"
 
 
-def load_post_budget_summary():
+def next_bucket_time(now_brt, bucket_minutes, usage_date=None):
+    if bucket_minutes <= 0:
+        return None
+
+    try:
+        social_date = datetime.strptime(usage_date, "%Y-%m-%d").date() if usage_date else now_brt.date()
+    except (TypeError, ValueError):
+        social_date = now_brt.date()
+
+    start_time = parse_hhmm(load_wake_window_start())
+    window_start = datetime.combine(social_date, start_time, tzinfo=BRASILIA_TZ)
+    if now_brt < window_start:
+        return window_start
+
+    elapsed_minutes = max(0, int((now_brt - window_start).total_seconds() // 60))
+    next_index = (elapsed_minutes // bucket_minutes) + 1
+    return window_start + timedelta(minutes=next_index * bucket_minutes)
+
+
+def load_post_budget_summary(now_brt=None):
+    now_brt = now_brt or brt_now()
     latest = load_json_file(SOCIAL_LATEST_FILE, default={}) or {}
     usage_date = latest.get("usage_date")
     usage = load_json_file(social_usage_file(usage_date), default={}) if usage_date else {}
@@ -152,7 +172,6 @@ def load_post_budget_summary():
     daily_budget = int(budget.get("daily_post_budget") or 0)
     bucket_target = int(budget.get("bucket_post_target") or 0)
     posts_allowed = int(budget.get("posts_allowed_so_far") or 0)
-    bucket_index = budget.get("bucket_index")
     bucket_minutes = int(budget.get("bucket_minutes") or 0)
 
     if not daily_budget and not bucket_target:
@@ -163,15 +182,7 @@ def load_post_budget_summary():
     if bucket_target:
         bucket_used = min(bucket_target, bucket_used)
 
-    next_bucket = None
-    if usage_date and bucket_minutes > 0 and bucket_index is not None:
-        try:
-            social_date = datetime.strptime(usage_date, "%Y-%m-%d").date()
-            start_time = parse_hhmm(load_wake_window_start())
-            window_start = datetime.combine(social_date, start_time, tzinfo=BRASILIA_TZ)
-            next_bucket = window_start + timedelta(minutes=(int(bucket_index) + 1) * bucket_minutes)
-        except (TypeError, ValueError):
-            next_bucket = None
+    next_bucket = next_bucket_time(now_brt, bucket_minutes, usage_date=usage_date)
 
     return {
         "usage_date": usage_date or "-",
@@ -179,7 +190,6 @@ def load_post_budget_summary():
         "daily_budget": daily_budget,
         "bucket_used": bucket_used,
         "bucket_target": bucket_target,
-        "bucket_index": bucket_index,
         "next_bucket": next_bucket.strftime("%H:%M") if next_bucket else "-",
     }
 
@@ -539,11 +549,19 @@ def social_completion_summary(entries, current_date):
 
 def format_social_completion_summary(total, today):
     if not total:
-        return "{}"
+        return "nenhuma"
+    labels = {
+        "-": "sem motivo",
+        "social_timeout": "timeout",
+        "alert_sent": "alert",
+        "max_social_checks": "maxchk",
+        "low_quote_liquidity": "lowliq",
+    }
     parts = []
     for reason, count in total.items():
-        parts.append(f"'{reason}': {count} ({today.get(reason, 0)} hoje)")
-    return "{" + ", ".join(parts) + "}"
+        label = labels.get(reason, str(reason))
+        parts.append(f"{label} {today.get(reason, 0)}/{count}")
+    return " | ".join(parts)
 
 
 def print_summary(watchlist, entries, args, previous_positions):
@@ -561,10 +579,9 @@ def print_summary(watchlist, entries, args, previous_positions):
             min_quote_liquidity_usd=min_quote_liquidity_usd,
         )
     ]
-    social_active = [entry for entry in all_entries if entry["social_status"] == "ativo"]
     social_done = [entry for entry in all_entries if entry["social_status"] == "concluido"]
-    post_budget = load_post_budget_summary()
     current_brt = brt_now()
+    post_budget = load_post_budget_summary(now_brt=current_brt)
     completion_total, completion_today = social_completion_summary(social_done, current_brt.date())
 
     print("=== KRPTO-V | Watchlist Ranking ===")
@@ -583,8 +600,7 @@ def print_summary(watchlist, entries, args, previous_positions):
     print(f"Por chain: {dict(Counter(entry['chain'] for entry in all_entries))}")
     print(f"Status WL: {dict(Counter(entry['status'] for entry in all_entries))}")
     print(f"Status social: {dict(Counter(entry['social_status'] for entry in all_entries))}")
-    print(f"Social em observacao: {len(social_active)} | concluidos: {len(social_done)}")
-    print(f"Conclusao social na WL: {format_social_completion_summary(completion_total, completion_today)}")
+    print(f"Conclusao social hoje/total: {format_social_completion_summary(completion_total, completion_today)}")
     print(f"Social eligibility: {dict(Counter(entry['social_eligibility'] for entry in all_entries))}")
     if args.chain:
         print(f"Filtro chain: {args.chain}")

@@ -129,6 +129,28 @@ class WatchlistRankingTests(unittest.TestCase):
         self.assertEqual(total["alert_sent"], 2)
         self.assertEqual(today["alert_sent"], 1)
         self.assertEqual(today["max_social_checks"], 1)
+        self.assertEqual(
+            watchlist_ranking.format_social_completion_summary(total, today),
+            "alert 1/2 | maxchk 1/1",
+        )
+
+    def test_next_bucket_uses_current_brasilia_time(self):
+        current = watchlist_ranking.datetime(
+            2026,
+            6,
+            15,
+            18,
+            33,
+            tzinfo=watchlist_ranking.BRASILIA_TZ,
+        )
+
+        next_bucket = watchlist_ranking.next_bucket_time(
+            current,
+            bucket_minutes=32,
+            usage_date="2026-06-15",
+        )
+
+        self.assertEqual(next_bucket.strftime("%H:%M"), "19:04")
 
 
 if __name__ == "__main__":
