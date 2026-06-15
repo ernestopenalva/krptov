@@ -1,5 +1,8 @@
 import argparse
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from src.tools import watchlist_ranking
 
@@ -151,6 +154,39 @@ class WatchlistRankingTests(unittest.TestCase):
         )
 
         self.assertEqual(next_bucket.strftime("%H:%M"), "19:04")
+
+    def test_last_social_cycle_summary_counts_latest_timestamp(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            data_dir = root / "data"
+            data_dir.mkdir()
+            history = data_dir / "social_inference_2026-06-15.jsonl"
+            rows = [
+                {"timestamp": "2026-06-15T10:00:00", "status_before": "novo"},
+                {"timestamp": "2026-06-15T10:00:00", "status_before": "ativo"},
+                {"timestamp": "2026-06-15T10:03:00", "status_before": "novo"},
+                {"timestamp": "2026-06-15T10:03:00", "status_before": "novo"},
+                {"timestamp": "2026-06-15T10:03:00", "status_before": "ativo"},
+            ]
+            history.write_text(
+                "\n".join(json.dumps(row) for row in rows),
+                encoding="utf-8",
+            )
+
+            original_root = watchlist_ranking.PROJECT_ROOT
+            watchlist_ranking.PROJECT_ROOT = root
+            try:
+                summary = watchlist_ranking.load_last_social_cycle_summary(
+                    "2026-06-15",
+                    new_limit=10,
+                    active_limit=40,
+                )
+            finally:
+                watchlist_ranking.PROJECT_ROOT = original_root
+
+        self.assertEqual(summary["new_count"], 2)
+        self.assertEqual(summary["active_count"], 1)
+        self.assertEqual(summary["total_count"], 3)
 
 
 if __name__ == "__main__":

@@ -64,14 +64,29 @@ def load_json_file(path, default=None):
         return default
 
 
-def load_social_settings(path=CONFIG_FILE, default_checks=3, default_min_age=30, default_min_quote_liquidity=1):
+def load_social_settings(
+    path=CONFIG_FILE,
+    default_checks=3,
+    default_min_age=30,
+    default_min_quote_liquidity=1,
+    default_max_new_tokens=10,
+    default_max_active_tokens=40,
+):
     if not path.exists():
-        return default_checks, default_min_age, default_min_quote_liquidity
+        return (
+            default_checks,
+            default_min_age,
+            default_min_quote_liquidity,
+            default_max_new_tokens,
+            default_max_active_tokens,
+        )
 
     in_social = False
     max_checks = default_checks
     min_age = default_min_age
     min_quote_liquidity = default_min_quote_liquidity
+    max_new_tokens = default_max_new_tokens
+    max_active_tokens = default_max_active_tokens
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         stripped = raw_line.split("#", 1)[0].strip()
         if not stripped:
@@ -97,8 +112,20 @@ def load_social_settings(path=CONFIG_FILE, default_checks=3, default_min_age=30,
                 min_quote_liquidity = float(value.strip().strip('"').strip("'"))
             except ValueError:
                 min_quote_liquidity = default_min_quote_liquidity
+        if in_social and stripped.startswith("max_new_tokens_per_cycle:"):
+            _, value = stripped.split(":", 1)
+            try:
+                max_new_tokens = int(value.strip().strip('"').strip("'"))
+            except ValueError:
+                max_new_tokens = default_max_new_tokens
+        if in_social and stripped.startswith("max_active_tokens_per_cycle:"):
+            _, value = stripped.split(":", 1)
+            try:
+                max_active_tokens = int(value.strip().strip('"').strip("'"))
+            except ValueError:
+                max_active_tokens = default_max_active_tokens
 
-    return max_checks, min_age, min_quote_liquidity
+    return max_checks, min_age, min_quote_liquidity, max_new_tokens, max_active_tokens
 
 
 def load_wake_window_start(path=CONFIG_FILE, default_start="10:00"):
@@ -139,6 +166,12 @@ def social_usage_file(usage_date):
     if not usage_date:
         return None
     return PROJECT_ROOT / "data" / f"social_inference_usage_{usage_date}.json"
+
+
+def social_history_file(usage_date):
+    if not usage_date:
+        return None
+    return PROJECT_ROOT / "data" / f"social_inference_{usage_date}.jsonl"
 
 
 def next_bucket_time(now_brt, bucket_minutes, usage_date=None):
@@ -191,6 +224,51 @@ def load_post_budget_summary(now_brt=None):
         "bucket_used": bucket_used,
         "bucket_target": bucket_target,
         "next_bucket": next_bucket.strftime("%H:%M") if next_bucket else "-",
+    }
+
+
+def load_last_social_cycle_summary(usage_date, new_limit=10, active_limit=40):
+    path = social_history_file(usage_date)
+    if not path or not path.exists():
+        return None
+
+    last_timestamp = None
+    records = []
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            for line in file:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                timestamp = record.get("timestamp")
+                if not timestamp:
+                    continue
+                if timestamp != last_timestamp:
+                    last_timestamp = timestamp
+                    records = [record]
+                else:
+                    records.append(record)
+    except OSError:
+        return None
+
+    if not records:
+        return None
+
+    new_count = sum(1 for record in records if record.get("status_before") == "novo")
+    active_count = sum(1 for record in records if record.get("status_before") == "ativo")
+    total_count = len(records)
+    return {
+        "timestamp": last_timestamp,
+        "new_count": new_count,
+        "active_count": active_count,
+        "total_count": total_count,
+        "new_limit": new_limit,
+        "active_limit": active_limit,
+        "total_limit": new_limit + active_limit,
     }
 
 
@@ -422,7 +500,7 @@ def ranked_entries(watchlist, args):
         for key, entry in watchlist.items()
     ]
     entries = [entry for entry in entries if entry]
-    _, min_social_age_minutes, min_quote_liquidity_usd = load_social_settings()
+    _, min_social_age_minutes, min_quote_liquidity_usd, _, _ = load_social_settings()
     entries = filter_entries(
         entries,
         args,
@@ -565,7 +643,13 @@ def format_social_completion_summary(total, today):
 
 
 def print_summary(watchlist, entries, args, previous_positions):
-    max_social_checks, min_social_age_minutes, min_quote_liquidity_usd = load_social_settings()
+    (
+        max_social_checks,
+        min_social_age_minutes,
+        min_quote_liquidity_usd,
+        max_new_tokens,
+        max_active_tokens,
+    ) = load_social_settings()
     all_entries = [
         normalize_entry(key, entry)
         for key, entry in watchlist.items()
@@ -582,6 +666,12 @@ def print_summary(watchlist, entries, args, previous_positions):
     social_done = [entry for entry in all_entries if entry["social_status"] == "concluido"]
     current_brt = brt_now()
     post_budget = load_post_budget_summary(now_brt=current_brt)
+    usage_date = post_budget.get("usage_date") if post_budget else current_brt.strftime("%Y-%m-%d")
+    last_cycle = load_last_social_cycle_summary(
+        usage_date,
+        new_limit=max_new_tokens,
+        active_limit=max_active_tokens,
+    )
     completion_total, completion_today = social_completion_summary(social_done, current_brt.date())
 
     print("=== KRPTO-V | Watchlist Ranking ===")
@@ -589,6 +679,12 @@ def print_summary(watchlist, entries, args, previous_positions):
     print(f"WL total: {len(all_entries)}")
     print(f"Visiveis no filtro: {len(entries)} | Candidatos social: {len(social_candidates)}")
     print(f"Idade minima social: {min_social_age_minutes}m | QLiq minima social: US$ {min_quote_liquidity_usd:g}")
+    if last_cycle:
+        print(
+            f"Ultimo ciclo: novos {last_cycle['new_count']}/{last_cycle['new_limit']} | "
+            f"ativos {last_cycle['active_count']}/{last_cycle['active_limit']} | "
+            f"total {last_cycle['total_count']}/{last_cycle['total_limit']}"
+        )
     if post_budget:
         daily_total = post_budget["daily_budget"] or "sem limite"
         bucket_total = post_budget["bucket_target"] or "sem limite"
