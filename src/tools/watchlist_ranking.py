@@ -11,6 +11,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WATCHLIST_FILE = PROJECT_ROOT / "data" / "watchlist.json"
 CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
+SOCIAL_LATEST_FILE = PROJECT_ROOT / "data" / "social_inference_latest.json"
 
 
 def utc_now_iso():
@@ -28,6 +29,17 @@ def load_watchlist(path=WATCHLIST_FILE):
         raise ValueError("data/watchlist.json precisa ser um dict.")
 
     return payload
+
+
+def load_json_file(path, default=None):
+    if not path.exists():
+        return default
+
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            return json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return default
 
 
 def load_social_settings(path=CONFIG_FILE, default_checks=3, default_min_age=30, default_min_quote_liquidity=1):
@@ -65,6 +77,43 @@ def load_social_settings(path=CONFIG_FILE, default_checks=3, default_min_age=30,
                 min_quote_liquidity = default_min_quote_liquidity
 
     return max_checks, min_age, min_quote_liquidity
+
+
+def social_usage_file(usage_date):
+    if not usage_date:
+        return None
+    return PROJECT_ROOT / "data" / f"social_inference_usage_{usage_date}.json"
+
+
+def load_post_budget_summary():
+    latest = load_json_file(SOCIAL_LATEST_FILE, default={}) or {}
+    usage_date = latest.get("usage_date")
+    usage = load_json_file(social_usage_file(usage_date), default={}) if usage_date else {}
+    usage = usage or {}
+    budget = latest.get("post_budget") or {}
+
+    posts_returned = int(usage.get("posts_returned") or latest.get("posts_returned_today") or budget.get("posts_returned") or 0)
+    daily_budget = int(budget.get("daily_post_budget") or 0)
+    bucket_target = int(budget.get("bucket_post_target") or 0)
+    posts_allowed = int(budget.get("posts_allowed_so_far") or 0)
+    bucket_index = budget.get("bucket_index")
+
+    if not daily_budget and not bucket_target:
+        return None
+
+    previous_allowed = max(0, posts_allowed - bucket_target) if bucket_target else 0
+    bucket_used = max(0, posts_returned - previous_allowed)
+    if bucket_target:
+        bucket_used = min(bucket_target, bucket_used)
+
+    return {
+        "usage_date": usage_date or "-",
+        "posts_returned": posts_returned,
+        "daily_budget": daily_budget,
+        "bucket_used": bucket_used,
+        "bucket_target": bucket_target,
+        "bucket_index": bucket_index,
+    }
 
 
 def numeric_or_none(value):
@@ -450,12 +499,20 @@ def print_summary(watchlist, entries, args, previous_positions):
     ]
     social_active = [entry for entry in all_entries if entry["social_status"] == "ativo"]
     social_done = [entry for entry in all_entries if entry["social_status"] == "concluido"]
+    post_budget = load_post_budget_summary()
 
     print("=== KRPTO-V | Watchlist Ranking ===")
     print(f"Atualizado: {utc_now_iso()}")
     print(f"WL total: {len(all_entries)}")
     print(f"Visiveis no filtro: {len(entries)} | Candidatos social: {len(social_candidates)}")
     print(f"Idade minima social: {min_social_age_minutes}m | QLiq minima social: US$ {min_quote_liquidity_usd:g}")
+    if post_budget:
+        daily_total = post_budget["daily_budget"] or "sem limite"
+        bucket_total = post_budget["bucket_target"] or "sem limite"
+        print(
+            f"Posts hoje: {post_budget['posts_returned']}/{daily_total} | "
+            f"Bucket: {post_budget['bucket_used']}/{bucket_total}"
+        )
     print(f"Por chain: {dict(Counter(entry['chain'] for entry in all_entries))}")
     print(f"Status WL: {dict(Counter(entry['status'] for entry in all_entries))}")
     print(f"Status social: {dict(Counter(entry['social_status'] for entry in all_entries))}")

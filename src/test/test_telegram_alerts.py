@@ -383,6 +383,58 @@ class TelegramNotifierTests(unittest.TestCase):
         self.assertNotIn("23.767 seguidores)\n- autor com grande audiência (27.703", message)
 
 
+    def test_alert_message_deduplicates_repeated_follower_reason(self):
+        alert = {
+            "alert_rank": 40,
+            "chain_id": "base",
+            "token_address": "0xfd2b390aea434aad835e5f882d9f2d6ef1f0ba3",
+            "alert_reasons": [
+                "author_followers_high>=22320",
+                "author_followers_high>=22320",
+            ],
+            "author_username": "pitted_venom",
+            "author_followers": 22320,
+            "top_followers_author_summaries": [
+                {
+                    "username": "pitted_venom",
+                    "followers": 22320,
+                    "reasons": ["author_followers_high>=22320"],
+                }
+            ],
+            "trigger_posts": [{"url": "https://x.com/pitted_venom/status/1", "author_username": "pitted_venom"}],
+        }
+
+        message = telegram_notifier.build_alert_message(alert, {"token_symbol": "INFR", "quote_token": "USDC"})
+
+        self.assertEqual(message.count("autor com grande audi"), 1)
+
+    def test_alert_message_prefers_affiliated_author_post(self):
+        alert = {
+            "alert_rank": 100,
+            "chain_id": "bsc",
+            "token_address": "0xbb87dc5daac59d6e11ea2461ca69543f4b844444",
+            "alert_reasons": ["author_affiliation_found"],
+            "author_username": "Dwen_Exchange",
+            "author_followers": 12206,
+            "best_affiliation_author_summary": {
+                "username": "Dwen_Exchange",
+                "followers": 12206,
+                "affiliation_found": True,
+                "affiliation_name": "Flap",
+                "affiliation_username": "flapdotsh",
+            },
+            "trigger_posts": [
+                {"url": "https://x.com/tggjh14779/status/1", "author_username": "tggjh14779"},
+                {"url": "https://x.com/Dwen_Exchange/status/2", "author_username": "Dwen_Exchange"},
+            ],
+        }
+
+        message = telegram_notifier.build_alert_message(alert, {"token_symbol": "Korico", "quote_token": "WBNB"})
+
+        self.assertIn("<b>Post:</b> https://x.com/Dwen_Exchange/status/2", message)
+        self.assertNotIn("<b>Post:</b> https://x.com/tggjh14779/status/1", message)
+
+
 class SocialInferenceTelegramTests(unittest.TestCase):
     def run_social_cycle(self, root, send_alert_mock, analysis=None):
         watchlist_file = root / "watchlist.json"

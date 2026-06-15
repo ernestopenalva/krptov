@@ -336,6 +336,8 @@ def follower_reason_lines(alert, limit=3):
         )
         if len(lines) >= limit:
             return lines
+    if lines:
+        return lines[:limit]
 
     follower_reasons = [
         reason
@@ -411,17 +413,39 @@ def format_alert_reasons(reasons, alert=None):
         if str(reason).startswith("author_followers_") and follower_lines:
             continue
         formatted.append(format_alert_reason(reason, alert=alert))
-    formatted = follower_lines + formatted
-    formatted = [reason for reason in formatted if reason]
+    deduped = []
+    seen = set()
+    for reason in follower_lines + formatted:
+        if not reason:
+            continue
+        normalized = str(reason).strip().lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(reason)
+    formatted = deduped
     if not formatted:
         return "nenhum"
     return "\n" + "\n".join(f"- {reason}" for reason in formatted)
+
+
+def normalized_username(value):
+    return str(value or "").strip().lower().lstrip("@")
 
 
 def first_trigger_post(alert):
     posts = alert.get("trigger_posts") or []
     if not posts:
         return {}
+
+    affiliation_summary = alert.get("best_affiliation_author_summary") or {}
+    affiliation_username = normalized_username(affiliation_summary.get("username"))
+    if affiliation_username:
+        for post in posts:
+            if not isinstance(post, dict):
+                continue
+            if normalized_username(post.get("author_username")) == affiliation_username:
+                return post
 
     first = posts[0]
     return first if isinstance(first, dict) else {}
