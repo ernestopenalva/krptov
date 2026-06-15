@@ -44,18 +44,22 @@ MARKET_SANITY_OK = "ok"
 MARKET_SANITY_MISLEADING_LIQUIDITY = "misleading_liquidity"
 MARKET_SANITY_REASON_MISLEADING_LIQUIDITY = "high_dex_liquidity_low_quote_liquidity"
 TRUSTED_QUOTE_SYMBOLS = {
+    "BNB",
+    "WBNB",
     "ETH",
     "WETH",
     "USDC",
     "USDT",
     "USDBC",
     "DAI",
+    "BUSD",
 }
 STABLE_QUOTE_SYMBOLS = {
     "USDC",
     "USDT",
     "USDBC",
     "DAI",
+    "BUSD",
 }
 MISLEADING_LIQUIDITY_USD_THRESHOLD = 100_000
 MISLEADING_QUOTE_LIQUIDITY_USD_THRESHOLD = 1_000

@@ -220,6 +220,42 @@ class MarketRankerBatchTests(unittest.TestCase):
         self.assertEqual(metrics["selected_quote_liquidity_usd"], 4000)
         self.assertGreater(score, 80)
 
+    def test_bsc_quotes_are_trusted_for_quote_liquidity(self):
+        token_address = "0x1111111111111111111111111111111111111111"
+        wbnb_pair = {
+            "chainId": "bsc",
+            "dexId": "pancakeswap",
+            "pairAddress": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "baseToken": {"address": token_address, "symbol": "TEST", "name": "Test Token"},
+            "quoteToken": {
+                "address": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+                "symbol": "WBNB",
+                "name": "Wrapped BNB",
+            },
+            "priceNative": "0.001",
+            "priceUsd": "0.6",
+            "liquidity": {"usd": 6000, "base": 5000, "quote": 10},
+        }
+        busd_pair = {
+            **wbnb_pair,
+            "quoteToken": {
+                "address": "0xe9e7cea3dedca5984780bafc599bd69add087d56",
+                "symbol": "BUSD",
+                "name": "BUSD Token",
+            },
+            "priceNative": "0.5",
+            "priceUsd": "0.5",
+            "liquidity": {"usd": 2000, "base": 4000, "quote": 1000},
+        }
+
+        wbnb_metrics = market_ranker.quote_liquidity_metrics(wbnb_pair, token_address)
+        busd_metrics = market_ranker.quote_liquidity_metrics(busd_pair, token_address)
+
+        self.assertEqual(wbnb_metrics["quote_liquidity_symbol"], "WBNB")
+        self.assertEqual(wbnb_metrics["quote_liquidity_usd"], 6000)
+        self.assertEqual(busd_metrics["quote_liquidity_symbol"], "BUSD")
+        self.assertEqual(busd_metrics["quote_liquidity_usd"], 1000)
+
     def test_watchlist_retention_applies_blind_cap_without_removing_protected(self):
         current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
 

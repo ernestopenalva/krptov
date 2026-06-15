@@ -41,11 +41,13 @@ DEFAULT_APIS = ("dexscreener", "geckoterminal", "dexpaprika")
 GECKOTERMINAL_NETWORKS = {
     "ethereum": "eth",
     "base": "base",
+    "bsc": "bsc",
 }
 
 DEXPAPRIKA_NETWORKS = {
     "ethereum": "ethereum",
     "base": "base",
+    "bsc": "bsc",
 }
 
 

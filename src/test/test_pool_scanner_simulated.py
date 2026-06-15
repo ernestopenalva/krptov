@@ -39,6 +39,11 @@ TX_HASH = "0x" + ("cd" * 32)
 BASE_WETH = "0x4200000000000000000000000000000000000006"
 AERODROME_FACTORY = "0x420dd381b31aef6683db6b902084cb0ffece40da"
 AERODROME_SLIPSTREAM_FACTORY = "0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a"
+BSC_WBNB = "0xbb4cdB9CBd36B01bD1cBaEBF2De08d9173bc095c".lower()
+BSC_USDT = "0x55d398326f99059ff775485246999027b3197955"
+PANCAKESWAP_V2_FACTORY = "0xca143ce32fe78f1f7019d7d551a6402fc5350c73"
+PANCAKESWAP_V3_FACTORY = "0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865"
+BSC_UNISWAP_V3_FACTORY = "0xdb1d10011ad0ff90774d0c6bb92e5c5c8b4461f7"
 
 
 def topic_address(address):
@@ -369,6 +374,63 @@ class PoolScannerSimulatedTests(unittest.TestCase):
             pool_scanner.AERODROME_SLIPSTREAM_POOL_CREATED_TOPIC,
         )
         self.assertEqual(sources["uniswap_v4"]["topic"], pool_scanner.INITIALIZE_TOPIC)
+
+    def test_bsc_config_reuses_v2_and_v3_source_types(self):
+        previous_rpc_url = os.environ.get("TEST_BNB_WSS_URL")
+        os.environ["TEST_BNB_WSS_URL"] = "wss://bnb.example.invalid"
+        try:
+            chains = pool_scanner.build_enabled_chains(
+                {
+                    "chains": {
+                        "bsc": {
+                            "enabled": True,
+                            "rpc_env": "TEST_BNB_WSS_URL",
+                            "quote_tokens": {
+                                "WBNB": BSC_WBNB,
+                                "USDT": BSC_USDT,
+                            },
+                            "sources": [
+                                {
+                                    "name": "pancakeswap_v2",
+                                    "enabled": True,
+                                    "type": "uniswap_v2_factory",
+                                    "factory_address": PANCAKESWAP_V2_FACTORY,
+                                    "event": "PairCreated",
+                                },
+                                {
+                                    "name": "pancakeswap_v3",
+                                    "enabled": True,
+                                    "type": "uniswap_v3_factory",
+                                    "factory_address": PANCAKESWAP_V3_FACTORY,
+                                    "event": "PoolCreated",
+                                },
+                                {
+                                    "name": "uniswap_v3",
+                                    "enabled": True,
+                                    "type": "uniswap_v3_factory",
+                                    "factory_address": BSC_UNISWAP_V3_FACTORY,
+                                    "event": "PoolCreated",
+                                },
+                            ],
+                        }
+                    }
+                }
+            )
+        finally:
+            if previous_rpc_url is None:
+                os.environ.pop("TEST_BNB_WSS_URL", None)
+            else:
+                os.environ["TEST_BNB_WSS_URL"] = previous_rpc_url
+
+        sources = {source["name"]: source for source in chains[0]["sources"]}
+        self.assertEqual(chains[0]["name"], "bsc")
+        self.assertEqual(chains[0]["quote_tokens"][BSC_WBNB], "WBNB")
+        self.assertEqual(chains[0]["quote_tokens"][BSC_USDT], "USDT")
+        self.assertEqual(sources["pancakeswap_v2"]["topic"], pool_scanner.PAIR_CREATED_TOPIC)
+        self.assertEqual(sources["pancakeswap_v2"]["decoder"], pool_scanner.decode_uniswap_v2_pair_created)
+        self.assertEqual(sources["pancakeswap_v3"]["topic"], pool_scanner.POOL_CREATED_TOPIC)
+        self.assertEqual(sources["pancakeswap_v3"]["decoder"], pool_scanner.decode_uniswap_v3_pool_created)
+        self.assertEqual(sources["uniswap_v3"]["topic"], pool_scanner.POOL_CREATED_TOPIC)
 
 
 if __name__ == "__main__":
