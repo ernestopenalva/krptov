@@ -368,7 +368,6 @@ def table_rows(entries, previous_positions, top, max_social_checks=5):
                 "quote_liq": format_money(entry["quote_liquidity_usd"]),
                 "vol": format_money(entry["volume_h24"]),
                 "txns": format_compact_number(entry["txns_h24"]),
-                "sanity": short_sanity(entry["market_sanity_status"]),
                 "ca": entry["token_address"],
                 "name": display_name(entry),
             }
@@ -393,14 +392,13 @@ def table_columns(width=None):
             ("status", "WL", 4),
             ("social_status", "Soc", 4),
             ("checks", "Chk", 4),
-            ("done", "Done", 6),
+            ("done", "Reas", 6),
             ("elig", "Elig", 5),
             ("minimum_age", "MinAg", 5),
             ("liq", "LiqDS", 8),
             ("quote_liq", "QLiq", 8),
             ("vol", "Vol", 8),
             ("txns", "Tx24h", 6),
-            ("sanity", "San", 3),
             ("ca", "CA", 42),
             ("name", "Nome", 18),
         ]
@@ -414,13 +412,13 @@ def table_columns(width=None):
         ("status", "WL", 4),
         ("social_status", "Soc", 4),
         ("checks", "Chk", 4),
+        ("done", "Reas", 5),
         ("elig", "Elig", 5),
         ("minimum_age", "MinA", 4),
         ("liq", "LiqDS", 6),
         ("quote_liq", "QLiq", 6),
         ("vol", "Vol", 6),
         ("txns", "Tx24h", 5),
-        ("sanity", "San", 3),
         ("name", "Nome", 8),
     ]
 
@@ -456,10 +454,8 @@ def print_summary(watchlist, entries, args, previous_positions):
     print("=== KRPTO-V | Watchlist Ranking ===")
     print(f"Atualizado: {utc_now_iso()}")
     print(f"WL total: {len(all_entries)}")
-    print(f"Visiveis no filtro: {len(entries)}")
-    print(f"Candidatos social: {len(social_candidates)}")
-    print(f"Idade minima social: {min_social_age_minutes}m")
-    print(f"QLiq minima social: US$ {min_quote_liquidity_usd:g}")
+    print(f"Visiveis no filtro: {len(entries)} | Candidatos social: {len(social_candidates)}")
+    print(f"Idade minima social: {min_social_age_minutes}m | QLiq minima social: US$ {min_quote_liquidity_usd:g}")
     print(f"Por chain: {dict(Counter(entry['chain'] for entry in all_entries))}")
     print(f"Status WL: {dict(Counter(entry['status'] for entry in all_entries))}")
     print(f"Status social: {dict(Counter(entry['social_status'] for entry in all_entries))}")

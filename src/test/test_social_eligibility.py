@@ -146,7 +146,7 @@ class SocialEligibilityTests(unittest.TestCase):
         self.assertEqual(usage["posts_returned_raw"], 6)
         self.assertEqual(usage["seen_tweet_ids"], ["100", "101", "102"])
 
-    def test_social_inference_finishes_active_observation_before_starting_new_token(self):
+    def test_social_inference_reserves_cycle_slots_for_new_and_active_tokens(self):
         watchlist = {
             "base:0x1111111111111111111111111111111111111111": {
                 "chain": "base",
@@ -155,6 +155,18 @@ class SocialEligibilityTests(unittest.TestCase):
                 "status": "ativo",
                 "social_status": "ativo",
                 "market_score": 60,
+                "social_monitoring_started_at": "2026-06-15T10:00:00",
+                "social_monitoring_expires_at": "2026-06-16T10:00:00",
+            },
+            "base:0x3333333333333333333333333333333333333333": {
+                "chain": "base",
+                "chain_id": "base",
+                "token_address": "0x3333333333333333333333333333333333333333",
+                "status": "ativo",
+                "social_status": "ativo",
+                "market_score": 50,
+                "social_monitoring_started_at": "2026-06-15T10:00:00",
+                "social_monitoring_expires_at": "2026-06-16T10:00:00",
             },
             "base:0x2222222222222222222222222222222222222222": {
                 "chain": "base",
@@ -165,11 +177,22 @@ class SocialEligibilityTests(unittest.TestCase):
                 "market_score": 90,
             },
         }
+        config = {
+            **social_inference.DEFAULT_CONFIG,
+            "max_tokens_per_cycle": 2,
+            "max_new_tokens_per_cycle": 1,
+            "max_active_tokens_per_cycle": 1,
+        }
 
-        candidates = social_inference.build_social_candidates(watchlist, social_inference.DEFAULT_CONFIG)
+        candidates = social_inference.build_social_candidates(watchlist, config)
 
-        self.assertEqual(candidates[0]["token_address"], "0x1111111111111111111111111111111111111111")
-        self.assertEqual(candidates[1]["token_address"], "0x2222222222222222222222222222222222222222")
+        self.assertEqual(
+            [candidate["token_address"] for candidate in candidates],
+            [
+                "0x2222222222222222222222222222222222222222",
+                "0x1111111111111111111111111111111111111111",
+            ],
+        )
 
     def test_ranker_blocks_social_when_oldest_pair_is_old(self):
         current_time = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)

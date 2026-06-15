@@ -65,6 +65,7 @@ DEFAULT_CONFIG = {
     "max_new_tokens_per_day": 0,
     "max_tokens_per_cycle": 0,
     "max_new_tokens_per_cycle": 0,
+    "max_active_tokens_per_cycle": 0,
     "wake_window": {
         "enabled": True,
         "timezone": "America/Sao_Paulo",
@@ -77,7 +78,7 @@ DEFAULT_CONFIG = {
         "bucket_minutes": 32,
         "bucket_post_target": 10,
     },
-    "max_social_checks_per_token": 3,
+    "max_social_checks_per_token": 5,
     "min_social_age_minutes": 30,
     "min_quote_liquidity_usd": 1,
     "prioritize_market_score": True,
@@ -546,15 +547,36 @@ def social_candidate_sort_key(candidate):
     entry = candidate["entry"]
     market_score = numeric_value(entry.get("market_score"))
     created_sort = timestamp_sort_value(entry.get("created_at_utc") or entry.get("discovered_at_utc"))
-    monitoring_active = is_monitoring_active(entry)
-    return (0 if monitoring_active else 1, -market_score, tuple(-item for item in created_sort))
+    return (-market_score, tuple(-item for item in created_sort))
+
+
+def is_new_social_candidate(candidate):
+    entry = candidate["entry"]
+    return entry.get("status") == STATUS_NOVO or needs_social_monitoring_start(entry)
 
 
 def limit_social_candidates(candidates, config):
     max_tokens = int(config.get("max_tokens_per_cycle") or 0)
     max_new_tokens = int(config.get("max_new_tokens_per_cycle") or 0)
-    if max_tokens <= 0 and max_new_tokens <= 0:
+    max_active_tokens = int(config.get("max_active_tokens_per_cycle") or 0)
+    if max_tokens <= 0 and max_new_tokens <= 0 and max_active_tokens <= 0:
         return candidates
+
+    if max_new_tokens > 0 or max_active_tokens > 0:
+        new_candidates = []
+        active_candidates = []
+        for candidate in candidates:
+            if is_new_social_candidate(candidate):
+                new_candidates.append(candidate)
+            else:
+                active_candidates.append(candidate)
+
+        limited = []
+        limited.extend(new_candidates[:max_new_tokens] if max_new_tokens > 0 else new_candidates)
+        limited.extend(active_candidates[:max_active_tokens] if max_active_tokens > 0 else active_candidates)
+        if max_tokens > 0:
+            return limited[:max_tokens]
+        return limited
 
     limited = []
     new_count = 0

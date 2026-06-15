@@ -66,11 +66,13 @@ class WatchlistRankingTests(unittest.TestCase):
         self.assertEqual(rows[0]["quote_liq"], "$900")
         self.assertEqual(rows[0]["vol"], "$3.4K")
         self.assertEqual(rows[0]["txns"], "12")
-        self.assertEqual(rows[0]["sanity"], "ok")
         self.assertEqual(rows[0]["ca"], "0x1111111111111111111111111111111111111111")
         self.assertEqual(rows[0]["minimum_age"], "45m")
         self.assertIn(("ca", "CA", 42), watchlist_ranking.table_columns(width=160))
+        self.assertNotIn(("sanity", "San", 3), watchlist_ranking.table_columns(width=160))
+        self.assertIn(("done", "Reas", 6), watchlist_ranking.table_columns(width=160))
         self.assertNotIn(("ca", "CA", 42), watchlist_ranking.table_columns(width=80))
+        self.assertIn(("done", "Reas", 5), watchlist_ranking.table_columns(width=80))
 
     def test_eligible_only_filters_social_candidates(self):
         watchlist = {
