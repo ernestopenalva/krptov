@@ -54,6 +54,26 @@ class FakeDexscreenerSession:
 
 
 class SocialEligibilityTests(unittest.TestCase):
+    def test_social_victor_has_no_minimum_age_gate_by_default(self):
+        current_time = datetime(2026, 6, 12, 12, 0, 0)
+        entry = {
+            "status": "novo",
+            "social_status": "pendente",
+            "social_eligibility": "eligible",
+            "market_score": 90,
+            "quote_liquidity_usd": 1000,
+            "minimum_token_age_inferred_minutes": 0,
+        }
+
+        self.assertEqual(social_inference.DEFAULT_CONFIG["min_social_age_minutes"], 0)
+        self.assertIsNone(
+            social_inference.social_query_skip_reason(
+                entry,
+                social_inference.DEFAULT_CONFIG,
+                current_time=current_time,
+            )
+        )
+
     def test_social_inference_waits_for_minimum_age_before_starting_new_token(self):
         current_time = datetime(2026, 6, 12, 12, 0, 0)
         config = {
@@ -81,7 +101,6 @@ class SocialEligibilityTests(unittest.TestCase):
             "status": "ativo",
             "social_status": "ativo",
             "social_eligibility": "eligible",
-            "market_score": 90,
             "quote_liquidity_usd": 1000,
             "minimum_token_age_inferred_minutes": 10,
         }
@@ -146,6 +165,30 @@ class SocialEligibilityTests(unittest.TestCase):
         self.assertEqual(usage["posts_returned_raw"], 6)
         self.assertEqual(usage["seen_tweet_ids"], ["100", "101", "102"])
 
+    def test_social_usage_deduplicates_posts_seen_in_previous_social_day(self):
+        current_time = datetime(2026, 6, 12, 12, 0, 0)
+        usage = {
+            "date": "2026-06-12",
+            "posts_returned": 0,
+            "posts_returned_raw": 0,
+            "seen_tweet_ids": [],
+            "checks": 0,
+        }
+        recent_posts = {"100": "2026-06-11T13:00:00"}
+
+        result = social_inference.register_social_check_usage(
+            "0x1",
+            current_time,
+            usage,
+            {"data": [{"id": "100"}, {"id": "101"}]},
+            recent_posts=recent_posts,
+        )
+
+        self.assertEqual(result["posts_returned"], 1)
+        self.assertEqual(result["posts_returned_raw"], 2)
+        self.assertEqual(usage["posts_returned"], 1)
+        self.assertEqual(recent_posts["101"], "2026-06-12T12:00:00")
+
     def test_social_inference_reserves_cycle_slots_for_new_and_active_tokens(self):
         watchlist = {
             "base:0x1111111111111111111111111111111111111111": {
@@ -179,9 +222,9 @@ class SocialEligibilityTests(unittest.TestCase):
         }
         config = {
             **social_inference.DEFAULT_CONFIG,
-            "max_tokens_per_cycle": 2,
+            "max_tokens_per_cycle": 0,
             "max_new_tokens_per_cycle": 1,
-            "max_active_tokens_per_cycle": 1,
+            "max_active_tokens_per_cycle": 0,
         }
 
         candidates = social_inference.build_social_candidates(watchlist, config)
@@ -189,10 +232,28 @@ class SocialEligibilityTests(unittest.TestCase):
         self.assertEqual(
             [candidate["token_address"] for candidate in candidates],
             [
-                "0x2222222222222222222222222222222222222222",
                 "0x1111111111111111111111111111111111111111",
+                "0x3333333333333333333333333333333333333333",
+                "0x2222222222222222222222222222222222222222",
             ],
         )
+
+    def test_social_victor_ignores_check_count_and_exits_by_time(self):
+        entry = {
+            "status": "ativo",
+            "social_status": "ativo",
+            "social_checks_count": 999,
+            "social_monitoring_started_at": "2026-06-12T10:00:00",
+            "social_monitoring_expires_at": "2026-06-12T12:00:00",
+        }
+        config = {**social_inference.DEFAULT_CONFIG, "max_social_checks_per_token": 0}
+
+        self.assertFalse(social_inference.reached_max_social_checks(entry, config))
+        social_inference.expire_social_monitoring(entry, datetime(2026, 6, 12, 12, 0, 0))
+
+        self.assertEqual(entry["social_status"], "concluido")
+        self.assertEqual(entry["status"], "descarte")
+        self.assertEqual(entry["social_completed_reason"], "social_timeout")
 
     def test_ranker_blocks_social_when_oldest_pair_is_old(self):
         current_time = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)

@@ -67,7 +67,7 @@ def load_json_file(path, default=None):
 def load_social_settings(
     path=CONFIG_FILE,
     default_checks=3,
-    default_min_age=30,
+    default_min_age=0,
     default_min_quote_liquidity=1,
     default_max_new_tokens=10,
     default_max_active_tokens=40,
@@ -153,6 +153,36 @@ def load_wake_window_start(path=CONFIG_FILE, default_start="10:00"):
     return start
 
 
+def load_social_victor_policy(path=CONFIG_FILE):
+    policy = {
+        "cycle_interval_seconds": 120,
+        "monitoring_window_hours": 2,
+        "max_new_tokens_per_cycle": 1,
+        "max_active_tokens_per_cycle": 0,
+    }
+    if not path.exists():
+        return policy
+
+    in_social = False
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw_line.split("#", 1)[0].strip()
+        if not stripped:
+            continue
+        if not raw_line.startswith(" ") and stripped.endswith(":"):
+            in_social = stripped[:-1] == "social_inference"
+            continue
+        if not in_social or ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        if key not in policy:
+            continue
+        try:
+            policy[key] = int(value.strip().strip('"').strip("'"))
+        except ValueError:
+            continue
+    return policy
+
+
 def parse_hhmm(value, default="10:00"):
     try:
         hour_text, minute_text = str(value or default).split(":", 1)
@@ -202,6 +232,7 @@ def load_post_budget_summary(now_brt=None):
     budget = latest.get("post_budget") or {}
 
     posts_returned = int(usage.get("posts_returned") or latest.get("posts_returned_today") or budget.get("posts_returned") or 0)
+    posts_returned_raw = int(usage.get("posts_returned_raw") or latest.get("posts_returned_raw_today") or 0)
     daily_budget = int(budget.get("daily_post_budget") or 0)
     bucket_target = int(budget.get("bucket_post_target") or 0)
     posts_allowed = int(budget.get("posts_allowed_so_far") or 0)
@@ -220,7 +251,9 @@ def load_post_budget_summary(now_brt=None):
     return {
         "usage_date": usage_date or "-",
         "posts_returned": posts_returned,
+        "posts_returned_raw": posts_returned_raw,
         "daily_budget": daily_budget,
+        "posts_remaining_daily": max(0, daily_budget - posts_returned) if daily_budget > 0 else None,
         "bucket_used": bucket_used,
         "bucket_target": bucket_target,
         "next_bucket": next_bucket.strftime("%H:%M") if next_bucket else "-",
@@ -410,6 +443,8 @@ def normalize_entry(key, entry):
         "social_checks_count": numeric_or_none(entry.get("social_checks_count")),
         "social_completed_reason": entry.get("social_completed_reason") or "-",
         "social_monitoring_completed_at": entry.get("social_monitoring_completed_at"),
+        "social_monitoring_started_at": entry.get("social_monitoring_started_at"),
+        "social_monitoring_expires_at": entry.get("social_monitoring_expires_at"),
         "social_last_posts_returned": numeric_or_none(entry.get("social_last_posts_returned")),
         "telegram_alert_sent": entry.get("telegram_alert_sent") is True,
         "social_eligibility": entry.get("social_eligibility") or "missing",
@@ -430,7 +465,7 @@ def normalize_entry(key, entry):
     }
 
 
-def social_ready(entry, min_social_age_minutes=30, min_quote_liquidity_usd=1):
+def social_ready(entry, min_social_age_minutes=0, min_quote_liquidity_usd=1):
     if entry.get("social_status") == "concluido":
         return False
 
@@ -456,13 +491,13 @@ def social_ready(entry, min_social_age_minutes=30, min_quote_liquidity_usd=1):
     return (
         entry["status"] in {"novo", "ativo"}
         and (entry["social_eligibility"] == "eligible" or monitoring_active)
-        and entry["market_score"] is not None
+        and (entry["market_score"] is not None or monitoring_active)
         and age_ready
         and quote_liquidity_ready
     )
 
 
-def filter_entries(entries, args, min_social_age_minutes=30, min_quote_liquidity_usd=1):
+def filter_entries(entries, args, min_social_age_minutes=0, min_quote_liquidity_usd=1):
     filtered = []
 
     for entry in entries:
@@ -483,15 +518,17 @@ def filter_entries(entries, args, min_social_age_minutes=30, min_quote_liquidity
     return filtered
 
 
-def ranking_sort_key(entry, min_social_age_minutes=30, min_quote_liquidity_usd=1):
+def ranking_sort_key(entry, min_social_age_minutes=0, min_quote_liquidity_usd=1):
     score = entry["market_score"]
     score_value = score if score is not None else -1
-    eligible_rank = 1 if social_ready(
+    ready = social_ready(
         entry,
         min_social_age_minutes=min_social_age_minutes,
         min_quote_liquidity_usd=min_quote_liquidity_usd,
-    ) else 0
-    return (eligible_rank, score_value, entry["last_seen_at_utc"])
+    )
+    monitoring_active = entry.get("social_status") == "ativo"
+    social_victor_rank = 2 if monitoring_active and ready else 1 if ready else 0
+    return (social_victor_rank, score_value, entry["last_seen_at_utc"])
 
 
 def ranked_entries(watchlist, args):
@@ -532,7 +569,24 @@ def movement_marker(key, position, previous_positions):
     return f"down {position - previous}"
 
 
-def table_rows(entries, previous_positions, top, max_social_checks=5):
+def format_monitoring_window(entry, current_time=None):
+    if entry.get("social_status") == "concluido":
+        return "fim"
+    if entry.get("social_status") != "ativo":
+        return "fila"
+    expires_at = parse_iso_datetime(entry.get("social_monitoring_expires_at"))
+    if not expires_at:
+        return "?"
+    seconds = max(0, int((expires_at - (current_time or brt_now())).total_seconds()))
+    if seconds <= 0:
+        return "exp"
+    minutes = (seconds + 59) // 60
+    if minutes >= 60:
+        return f"{minutes / 60:.1f}h"
+    return f"{minutes}m"
+
+
+def table_rows(entries, previous_positions, top, max_social_checks=0, current_time=None):
     rows = []
 
     for index, entry in enumerate(entries[:top], start=1):
@@ -545,7 +599,7 @@ def table_rows(entries, previous_positions, top, max_social_checks=5):
                 "quote": entry["quote_token"],
                 "status": compact_status(entry["status"]),
                 "social_status": compact_status(entry["social_status"]),
-                "checks": format_social_checks(entry["social_checks_count"], max_social_checks),
+                "window": format_monitoring_window(entry, current_time=current_time),
                 "elig": compact_eligibility(entry["social_eligibility"]),
                 "minimum_age": format_age(entry["minimum_token_age_inferred_minutes"]),
                 "liq": format_money(entry["liquidity_usd"]),
@@ -575,7 +629,7 @@ def table_columns(width=None):
             ("quote", "Qte", 5),
             ("status", "WL", 4),
             ("social_status", "Soc", 4),
-            ("checks", "Chk", 4),
+            ("window", "Jan", 5),
             ("elig", "Elig", 5),
             ("minimum_age", "MinAg", 5),
             ("liq", "LiqDS", 8),
@@ -594,7 +648,7 @@ def table_columns(width=None):
         ("quote", "Qte", 4),
         ("status", "WL", 4),
         ("social_status", "Soc", 4),
-        ("checks", "Chk", 4),
+        ("window", "Jan", 4),
         ("elig", "Elig", 5),
         ("minimum_age", "MinA", 4),
         ("liq", "LiqDS", 6),
@@ -632,7 +686,7 @@ def format_social_completion_summary(total, today):
         "-": "sem motivo",
         "social_timeout": "timeout",
         "alert_sent": "alert",
-        "max_social_checks": "maxchk",
+        "max_social_checks": "maxchk legado",
         "low_quote_liquidity": "lowliq",
     }
     parts = []
@@ -665,6 +719,7 @@ def print_summary(watchlist, entries, args, previous_positions):
     ]
     social_done = [entry for entry in all_entries if entry["social_status"] == "concluido"]
     current_brt = brt_now()
+    policy = load_social_victor_policy()
     post_budget = load_post_budget_summary(now_brt=current_brt)
     usage_date = post_budget.get("usage_date") if post_budget else current_brt.strftime("%Y-%m-%d")
     last_cycle = load_last_social_cycle_summary(
@@ -678,20 +733,28 @@ def print_summary(watchlist, entries, args, previous_positions):
     print(f"Atualizado: {current_brt.isoformat(timespec='seconds')}")
     print(f"WL total: {len(all_entries)}")
     print(f"Visiveis no filtro: {len(entries)} | Candidatos social: {len(social_candidates)}")
-    print(f"Idade minima social: {min_social_age_minutes}m | QLiq minima social: US$ {min_quote_liquidity_usd:g}")
+    print(
+        f"Politica Social Victor: ciclo {policy['cycle_interval_seconds']}s | "
+        f"janela {policy['monitoring_window_hours']}h | idade minima desabilitada"
+    )
+    print(
+        f"Selecao por ciclo: {policy['max_new_tokens_per_cycle']} novo melhor rankeado + "
+        f"ativos {'sem teto' if policy['max_active_tokens_per_cycle'] <= 0 else policy['max_active_tokens_per_cycle']} | "
+        f"QLiq minima: US$ {min_quote_liquidity_usd:g}"
+    )
     if last_cycle:
         print(
             f"Ultimo ciclo: novos {last_cycle['new_count']}/{last_cycle['new_limit']} | "
-            f"ativos {last_cycle['active_count']}/{last_cycle['active_limit']} | "
-            f"total {last_cycle['total_count']}/{last_cycle['total_limit']}"
+            f"ativos {last_cycle['active_count']}/{'sem teto' if last_cycle['active_limit'] <= 0 else last_cycle['active_limit']} | "
+            f"total {last_cycle['total_count']}"
         )
     if post_budget:
         daily_total = post_budget["daily_budget"] or "sem limite"
-        bucket_total = post_budget["bucket_target"] or "sem limite"
+        remaining = post_budget["posts_remaining_daily"]
         print(
-            f"Posts hoje: {post_budget['posts_returned']}/{daily_total} | "
-            f"Bucket: {post_budget['bucket_used']}/{bucket_total} | "
-            f"Proximo: {post_budget['next_bucket']}"
+            f"Posts hoje: unicos {post_budget['posts_returned']}/{daily_total} | "
+            f"brutos {post_budget['posts_returned_raw']} | "
+            f"restante {'sem limite' if remaining is None else remaining}"
         )
     print(f"Por chain: {dict(Counter(entry['chain'] for entry in all_entries))}")
     print(f"Status WL: {dict(Counter(entry['status'] for entry in all_entries))}")

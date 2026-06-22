@@ -71,7 +71,9 @@ class WatchlistRankingTests(unittest.TestCase):
         self.assertEqual(rows[0]["txns"], "12")
         self.assertEqual(rows[0]["ca"], "0x1111111111111111111111111111111111111111")
         self.assertEqual(rows[0]["minimum_age"], "45m")
+        self.assertEqual(rows[0]["window"], "fila")
         self.assertIn(("ca", "CA", 42), watchlist_ranking.table_columns(width=160))
+        self.assertIn(("window", "Jan", 5), watchlist_ranking.table_columns(width=160))
         self.assertNotIn(("sanity", "San", 3), watchlist_ranking.table_columns(width=160))
         self.assertNotIn(("done", "Reas", 6), watchlist_ranking.table_columns(width=160))
         self.assertNotIn(("ca", "CA", 42), watchlist_ranking.table_columns(width=80))
@@ -100,6 +102,38 @@ class WatchlistRankingTests(unittest.TestCase):
 
         self.assertEqual(len(ranked), 1)
         self.assertEqual(ranked[0]["market_score"], 10)
+
+    def test_social_victor_prioritizes_active_and_shows_remaining_window(self):
+        current = watchlist_ranking.datetime(
+            2026, 6, 15, 12, 0, tzinfo=watchlist_ranking.BRASILIA_TZ
+        )
+        watchlist = {
+            "ethereum:0x1111111111111111111111111111111111111111": {
+                "chain": "ethereum",
+                "token_address": "0x1111111111111111111111111111111111111111",
+                "status": "ativo",
+                "social_status": "ativo",
+                "social_eligibility": "blocked_old_market",
+                "quote_liquidity_usd": 1000,
+                "social_monitoring_expires_at": "2026-06-15T13:30:00-03:00",
+            },
+            "ethereum:0x2222222222222222222222222222222222222222": {
+                "chain": "ethereum",
+                "token_address": "0x2222222222222222222222222222222222222222",
+                "status": "novo",
+                "social_status": "pendente",
+                "social_eligibility": "eligible",
+                "market_score": 100,
+                "quote_liquidity_usd": 1000,
+            },
+        }
+
+        ranked = watchlist_ranking.ranked_entries(watchlist, args())
+        rows = watchlist_ranking.table_rows(ranked, {}, top=2, current_time=current)
+
+        self.assertEqual(ranked[0]["social_status"], "ativo")
+        self.assertEqual(rows[0]["window"], "1.5h")
+        self.assertEqual(rows[1]["window"], "fila")
 
     def test_movement_marker_reports_position_change(self):
         previous = {"a": 3, "b": 1}
@@ -134,7 +168,7 @@ class WatchlistRankingTests(unittest.TestCase):
         self.assertEqual(today["max_social_checks"], 1)
         self.assertEqual(
             watchlist_ranking.format_social_completion_summary(total, today),
-            "alert 1/2 | maxchk 1/1",
+            "alert 1/2 | maxchk legado 1/1",
         )
 
     def test_next_bucket_uses_current_brasilia_time(self):

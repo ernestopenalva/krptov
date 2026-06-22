@@ -18,15 +18,15 @@ social_inference:
   disable_post_metric_alerts: true
   require_social_eligibility: "eligible"
   require_numeric_market_score: true
-  monitoring_window_hours: 24
+  monitoring_window_hours: 2
   max_posts_per_token: 8
-  cycle_interval_seconds: 180
+  cycle_interval_seconds: 120
   max_new_tokens_per_day: 0
-  max_tokens_per_cycle: 50
-  max_new_tokens_per_cycle: 10
-  max_active_tokens_per_cycle: 40
-  max_social_checks_per_token: 5
-  min_social_age_minutes: 30
+  max_tokens_per_cycle: 0
+  max_new_tokens_per_cycle: 1
+  max_active_tokens_per_cycle: 0
+  max_social_checks_per_token: 0
+  min_social_age_minutes: 0
   min_quote_liquidity_usd: 1
   prioritize_market_score: true
 

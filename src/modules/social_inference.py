@@ -20,7 +20,7 @@ from src.modules import telegram_notifier
 
 X_SEARCH_RECENT_URL = "https://api.x.com/2/tweets/search/recent"
 X_USER_BY_USERNAME_URL = "https://api.x.com/2/users/by/username/{username}"
-SOCIAL_INFERENCE_VERSION = "krptov-social-inference-v1-x-ca-monitor-2026-05-22"
+SOCIAL_INFERENCE_VERSION = "krptov-social-inference-v1.1-social-victor-2026-06-21"
 X_USER_FIELDS = "username,name,description,created_at,verified,verified_type,is_identity_verified,affiliation,public_metrics,protected,parody,url"
 
 STATUS_NOVO = "novo"
@@ -59,12 +59,12 @@ DEFAULT_CONFIG = {
     "enabled": True,
     "scoring_mode": "origin_reputation",
     "disable_post_metric_alerts": True,
-    "monitoring_window_hours": 24,
+    "monitoring_window_hours": 2,
     "max_posts_per_token": 8,
-    "cycle_interval_seconds": 180,
+    "cycle_interval_seconds": 120,
     "max_new_tokens_per_day": 0,
     "max_tokens_per_cycle": 0,
-    "max_new_tokens_per_cycle": 0,
+    "max_new_tokens_per_cycle": 1,
     "max_active_tokens_per_cycle": 0,
     "wake_window": {
         "enabled": True,
@@ -78,8 +78,8 @@ DEFAULT_CONFIG = {
         "bucket_minutes": 32,
         "bucket_post_target": 10,
     },
-    "max_social_checks_per_token": 5,
-    "min_social_age_minutes": 30,
+    "max_social_checks_per_token": 0,
+    "min_social_age_minutes": 0,
     "min_quote_liquidity_usd": 1,
     "prioritize_market_score": True,
     "require_social_eligibility": SOCIAL_ELIGIBILITY_ELIGIBLE,
@@ -217,6 +217,7 @@ def bucket_state(local_time, config, usage):
         "posts_allowed_so_far": allowed_posts,
         "posts_returned": posts_returned,
         "posts_remaining_soft": max(0, allowed_posts - posts_returned),
+        "posts_remaining_daily": max(0, daily_budget - posts_returned) if daily_budget > 0 else None,
     }
 
 
@@ -231,7 +232,9 @@ def can_spend_post_budget(local_time, config, usage):
     if daily_budget > 0 and posts_returned >= daily_budget:
         return False
 
-    return posts_returned < state["posts_allowed_so_far"]
+    # Social Victor budgets unique posts, not queries. Bucket pacing remains in
+    # the snapshot for observability, but it must not suppress zero-cost checks.
+    return True
 
 
 def count_returned_posts(response_payload):
@@ -559,39 +562,24 @@ def limit_social_candidates(candidates, config):
     max_tokens = int(config.get("max_tokens_per_cycle") or 0)
     max_new_tokens = int(config.get("max_new_tokens_per_cycle") or 0)
     max_active_tokens = int(config.get("max_active_tokens_per_cycle") or 0)
-    if max_tokens <= 0 and max_new_tokens <= 0 and max_active_tokens <= 0:
-        return candidates
-
-    if max_new_tokens > 0 or max_active_tokens > 0:
-        new_candidates = []
-        active_candidates = []
-        for candidate in candidates:
-            if is_new_social_candidate(candidate):
-                new_candidates.append(candidate)
-            else:
-                active_candidates.append(candidate)
-
-        limited = []
-        limited.extend(new_candidates[:max_new_tokens] if max_new_tokens > 0 else new_candidates)
-        limited.extend(active_candidates[:max_active_tokens] if max_active_tokens > 0 else active_candidates)
-        if max_tokens > 0:
-            return limited[:max_tokens]
-        return limited
-
-    limited = []
-    new_count = 0
-
+    new_candidates = []
+    active_candidates = []
     for candidate in candidates:
-        if max_tokens > 0 and len(limited) >= max_tokens:
-            break
+        if is_new_social_candidate(candidate):
+            new_candidates.append(candidate)
+        else:
+            active_candidates.append(candidate)
 
-        if candidate["entry"].get("status") == STATUS_NOVO:
-            if max_new_tokens > 0 and new_count >= max_new_tokens:
-                continue
-            new_count += 1
+    # Active monitoring has continuity priority. New candidates are already
+    # sorted by market_score, so the first one is the best eligible newcomer.
+    if max_active_tokens > 0:
+        active_candidates = active_candidates[:max_active_tokens]
+    if max_new_tokens > 0:
+        new_candidates = new_candidates[:max_new_tokens]
 
-        limited.append(candidate)
-
+    limited = active_candidates + new_candidates
+    if max_tokens > 0:
+        limited = limited[:max_tokens]
     return limited
 
 
@@ -664,7 +652,7 @@ def social_query_skip_reason(entry, config, current_time=None):
             return SOCIAL_SKIP_REASON_OLD_MARKET
         return SOCIAL_SKIP_REASON_NOT_ELIGIBLE
 
-    if config.get("require_numeric_market_score", True):
+    if config.get("require_numeric_market_score", True) and not monitoring_active:
         if numeric_or_none(entry.get("market_score")) is None:
             return SOCIAL_SKIP_REASON_MISSING_MARKET_SCORE
 
@@ -1541,6 +1529,38 @@ def save_daily_usage(usage_date, usage):
     atomic_save_json(daily_usage_file(usage_date), usage)
 
 
+def recent_posts_file():
+    return DATA_DIR / "social_recent_posts.json"
+
+
+def load_recent_posts(current_time):
+    path = recent_posts_file()
+    loaded = {}
+    if path.exists():
+        with path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if isinstance(payload, dict):
+            loaded = payload.get("tweet_ids", payload)
+
+    cutoff = current_time - timedelta(hours=24)
+    return {
+        str(tweet_id): seen_at
+        for tweet_id, seen_at in loaded.items()
+        if parse_iso(seen_at) is not None and parse_iso(seen_at) >= cutoff
+    }
+
+
+def save_recent_posts(recent_posts, current_time):
+    atomic_save_json(
+        recent_posts_file(),
+        {
+            "updated_at": to_iso(current_time),
+            "deduplication_window_hours": 24,
+            "tweet_ids": recent_posts,
+        },
+    )
+
+
 def can_start_new_social_token(config, usage):
     max_new_tokens = int(config.get("max_new_tokens_per_day") or 0)
     if max_new_tokens <= 0:
@@ -1561,19 +1581,34 @@ def register_new_social_token_started(token_address, current_time, usage, chain_
     )
 
 
-def register_social_check_usage(token_address, current_time, usage, response_payload, chain_id=None, watchlist_key=None):
+def register_social_check_usage(
+    token_address,
+    current_time,
+    usage,
+    response_payload,
+    chain_id=None,
+    watchlist_key=None,
+    recent_posts=None,
+):
     posts_returned_raw = count_returned_posts(response_payload)
     tweet_ids = get_tweet_ids(response_payload.get("data") or [])
     seen_tweet_ids = {str(tweet_id) for tweet_id in (usage.get("seen_tweet_ids") or [])}
-    new_tweet_ids = [
-        str(tweet_id)
-        for tweet_id in tweet_ids
-        if str(tweet_id) not in seen_tweet_ids
-    ]
+    deduplication_ids = set(recent_posts or {}) | seen_tweet_ids
+    new_tweet_ids = []
+    for tweet_id in tweet_ids:
+        tweet_id = str(tweet_id)
+        if tweet_id in deduplication_ids:
+            continue
+        deduplication_ids.add(tweet_id)
+        new_tweet_ids.append(tweet_id)
 
     if new_tweet_ids:
         seen_tweet_ids.update(new_tweet_ids)
         usage["seen_tweet_ids"] = sorted(seen_tweet_ids)
+        if recent_posts is not None:
+            seen_at = to_iso(current_time)
+            for tweet_id in new_tweet_ids:
+                recent_posts[tweet_id] = seen_at
 
     usage["posts_returned"] = int(usage.get("posts_returned") or 0) + len(new_tweet_ids)
     usage["posts_returned_raw"] = int(usage.get("posts_returned_raw") or 0) + posts_returned_raw
@@ -1589,6 +1624,11 @@ def register_social_check_usage(token_address, current_time, usage, response_pay
             "new_tweet_ids": new_tweet_ids,
         }
     )
+    return {
+        "posts_returned": len(new_tweet_ids),
+        "posts_returned_raw": posts_returned_raw,
+        "new_tweet_ids": new_tweet_ids,
+    }
 
 
 def should_generate_alert(entry, analysis):
@@ -1781,8 +1821,11 @@ def print_summary(snapshot):
         f"Versao: {snapshot['version']}",
         f"Ciclo: {snapshot['timestamp']}",
         f"Tokens verificados: {snapshot['tokens_checked']}",
+        f"Tokens novos consultados: {snapshot.get('new_tokens_checked', 0)}",
+        f"Tokens ativos reconsultados: {snapshot.get('active_tokens_rechecked', 0)}",
+        f"Ativos dentro da janela: {snapshot.get('active_tokens_in_window', 0)}",
         f"Alertas gerados: {snapshot['alerts_generated']}",
-        f"Tokens expirados: {snapshot['tokens_expired']}",
+        f"Tokens expirados pela janela social: {snapshot['tokens_expired']}",
         f"Tokens bloqueados pelo limite diario: {snapshot.get('tokens_blocked_by_daily_limit', 0)}",
         f"Tokens bloqueados pelo orcamento de posts: {snapshot.get('tokens_blocked_by_post_budget', 0)}",
         f"Tokens bloqueados por idade social minima: {snapshot.get('tokens_blocked_by_min_social_age', 0)}",
@@ -1791,6 +1834,7 @@ def print_summary(snapshot):
         f"Tokens bloqueados por market_score: {snapshot.get('tokens_blocked_by_market_score', 0)}",
         f"Posts unicos no dia social: {snapshot.get('posts_returned_today', 0)}",
         f"Posts brutos retornados no dia social: {snapshot.get('posts_returned_raw_today', 0)}",
+        f"Orcamento diario restante: {snapshot.get('post_budget', {}).get('posts_remaining_daily', 'sem limite')}",
         f"Janela social ativa: {snapshot.get('wake_window_active', True)}",
         f"Erros: {len(snapshot['errors'])}",
     ]
@@ -1893,6 +1937,7 @@ def run_cycle(config_file=CONFIG_FILE):
 
     alerts = load_alerts()
     daily_usage = load_daily_usage(usage_date)
+    recent_posts = load_recent_posts(current_time)
     telegram_config = config.get("telegram_alerts") or {}
     telegram_env = telegram_notifier.load_telegram_env(PROJECT_ROOT / ".env")
     tokens_checked = 0
@@ -1904,6 +1949,12 @@ def run_cycle(config_file=CONFIG_FILE):
     tokens_blocked_by_min_social_age = 0
     tokens_blocked_by_quote_liquidity = 0
     tokens_blocked_by_market_score = 0
+    new_tokens_checked = 0
+    active_tokens_rechecked = 0
+    active_tokens_in_window = 0
+    new_tokens_checked_addresses = []
+    active_tokens_rechecked_addresses = []
+    expired_token_addresses = []
     with watchlist_lock():
         watchlist = load_watchlist(WATCHLIST_FILE)
         all_social_candidates = build_social_candidates(watchlist, config, apply_limits=False)
@@ -1913,9 +1964,10 @@ def run_cycle(config_file=CONFIG_FILE):
             entry = candidate["entry"]
             status_before = entry.get("status")
             expires_at = parse_iso(entry.get("social_monitoring_expires_at"))
-            if status_before == STATUS_ATIVO and expires_at and current_time >= expires_at:
+            if is_monitoring_active(entry) and expires_at and current_time >= expires_at:
                 expire_social_monitoring(entry, current_time)
                 tokens_expired += 1
+                expired_token_addresses.append(candidate["token_address"])
                 history_record = build_history_record(
                     token_address=candidate["token_address"],
                     status_before=status_before,
@@ -1927,6 +1979,9 @@ def run_cycle(config_file=CONFIG_FILE):
                 )
                 append_jsonl(DATA_DIR / f"social_inference_{date_stamp}.jsonl", history_record)
                 continue
+
+            if is_monitoring_active(entry) and expires_at:
+                active_tokens_in_window += 1
 
             skip_reason = social_query_skip_reason(entry, config, current_time=current_time)
             if not skip_reason:
@@ -2022,6 +2077,7 @@ def run_cycle(config_file=CONFIG_FILE):
                 response_payload,
                 chain_id=chain_id,
                 watchlist_key=watchlist_key,
+                recent_posts=recent_posts,
             )
 
             save_raw_posts(normalized_address, response_payload, current_time, chain_id=chain_id)
@@ -2038,6 +2094,12 @@ def run_cycle(config_file=CONFIG_FILE):
             analysis_payload = filter_response_to_tracked_posts(response_payload, tracked_tweet_ids)
             analysis = build_social_analysis(analysis_payload, config, bearer_token=bearer_token)
             tokens_checked += 1
+            if starting_new_social_token:
+                new_tokens_checked += 1
+                new_tokens_checked_addresses.append(normalized_address)
+            else:
+                active_tokens_rechecked += 1
+                active_tokens_rechecked_addresses.append(normalized_address)
             latest_tweet_id = get_latest_tweet_id(analysis["tweets"])
             if latest_tweet_id:
                 entry["social_latest_tweet_id"] = latest_tweet_id
@@ -2089,8 +2151,6 @@ def run_cycle(config_file=CONFIG_FILE):
                     float(entry.get("best_social_score") or 0),
                     float(analysis["best_post_score"] or 0),
                 )
-                if reached_max_social_checks(entry, config):
-                    finish_after_max_checks(entry, current_time)
 
             history_record = build_history_record(
                 token_address=normalized_address,
@@ -2111,6 +2171,12 @@ def run_cycle(config_file=CONFIG_FILE):
         "version": SOCIAL_INFERENCE_VERSION,
         "enabled": True,
         "tokens_checked": tokens_checked,
+        "new_tokens_checked": new_tokens_checked,
+        "active_tokens_rechecked": active_tokens_rechecked,
+        "active_tokens_in_window": active_tokens_in_window,
+        "new_tokens_checked_addresses": new_tokens_checked_addresses,
+        "active_tokens_rechecked_addresses": active_tokens_rechecked_addresses,
+        "expired_token_addresses": expired_token_addresses,
         "alerts_generated": alerts_generated,
         "tokens_expired": tokens_expired,
         "tokens_blocked_by_daily_limit": tokens_blocked_by_daily_limit,
@@ -2129,6 +2195,7 @@ def run_cycle(config_file=CONFIG_FILE):
 
     atomic_save_json(ALERTS_FILE, alerts)
     save_daily_usage(usage_date, daily_usage)
+    save_recent_posts(recent_posts, current_time)
     atomic_save_json(LATEST_SNAPSHOT_FILE, snapshot)
 
     summary_lines = print_summary(snapshot)
