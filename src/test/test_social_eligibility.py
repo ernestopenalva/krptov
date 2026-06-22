@@ -54,6 +54,39 @@ class FakeDexscreenerSession:
 
 
 class SocialEligibilityTests(unittest.TestCase):
+    def setUp(self):
+        wake_patcher = patch.object(
+            social_inference,
+            "is_wake_window_active",
+            return_value=True,
+        )
+        wake_patcher.start()
+        self.addCleanup(wake_patcher.stop)
+
+    def test_social_loads_global_wake_window(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_file = Path(temp_dir) / "config.yaml"
+            config_file.write_text(
+                "\n".join(
+                    [
+                        "system_wake_window:",
+                        "  enabled: true",
+                        '  timezone: "America/Sao_Paulo"',
+                        '  start: "11:00"',
+                        '  end: "01:00"',
+                        "",
+                        "social_inference:",
+                        "  enabled: true",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            config = social_inference.load_config(config_file)
+
+        self.assertEqual(config["wake_window"]["start"], "11:00")
+        self.assertEqual(config["wake_window"]["end"], "01:00")
+
     def test_social_victor_has_no_minimum_age_gate_by_default(self):
         current_time = datetime(2026, 6, 12, 12, 0, 0)
         entry = {

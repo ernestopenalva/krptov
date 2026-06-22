@@ -544,6 +544,10 @@ class SocialInferenceTelegramTests(unittest.TestCase):
             "build_social_analysis",
             return_value=analysis,
         ), patch.object(
+            social_inference,
+            "is_wake_window_active",
+            return_value=True,
+        ), patch.object(
             social_inference.telegram_notifier,
             "send_alert",
             send_alert_mock,

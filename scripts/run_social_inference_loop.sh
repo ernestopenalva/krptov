@@ -3,8 +3,9 @@ set -uo pipefail
 
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-${PROJECT_ROOT}/.venv/bin/python}"
+source "${PROJECT_ROOT}/scripts/lib/system_wake_window.sh"
 
-SOCIAL_INTERVAL_SECONDS="${SOCIAL_INTERVAL_SECONDS:-300}"
+SOCIAL_INTERVAL_SECONDS="${SOCIAL_INTERVAL_SECONDS:-120}"
 SOCIAL_MAX_CYCLES="${SOCIAL_MAX_CYCLES:-0}"
 
 LOG_DIR="${PROJECT_ROOT}/logs"
@@ -42,6 +43,13 @@ log "Log da sessao: ${SESSION_LOG}"
 
 cycle=0
 while true; do
+    if ! system_wake_is_active; then
+        wait_seconds="$(system_wake_seconds_until_open)"
+        log "Fora da vigilia global; aguardando ${wait_seconds}s para reabrir"
+        sleep "${wait_seconds}"
+        continue
+    fi
+
     cycle=$((cycle + 1))
     log "Ciclo ${cycle}: iniciando social_inference"
     if ! run_cycle; then

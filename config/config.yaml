@@ -1,3 +1,9 @@
+system_wake_window:
+  enabled: true
+  timezone: "America/Sao_Paulo"
+  start: "10:00"
+  end: "02:00"
+
 token_scanner:
   chain_ids:
     - ethereum
@@ -29,12 +35,6 @@ social_inference:
   min_social_age_minutes: 0
   min_quote_liquidity_usd: 1
   prioritize_market_score: true
-
-  wake_window:
-    enabled: true
-    timezone: "America/Sao_Paulo"
-    start: "10:00"
-    end: "02:00"
 
   post_budget:
     enabled: true

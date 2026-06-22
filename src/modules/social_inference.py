@@ -348,8 +348,15 @@ def load_config(config_file=CONFIG_FILE):
     if not Path(config_file).exists():
         return config
 
-    loaded_sections = load_simple_yaml_sections(Path(config_file), {"social_inference", "telegram_alerts"})
+    loaded_sections = load_simple_yaml_sections(
+        Path(config_file),
+        {"system_wake_window", "social_inference", "telegram_alerts"},
+    )
     config = merge_dict(config, loaded_sections.get("social_inference", {}))
+    config["wake_window"] = merge_dict(
+        config.get("wake_window", {}),
+        loaded_sections.get("system_wake_window", {}),
+    )
     config["telegram_alerts"] = merge_dict(
         config.get("telegram_alerts", {}),
         loaded_sections.get("telegram_alerts", {}),

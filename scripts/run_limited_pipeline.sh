@@ -3,6 +3,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-${PROJECT_ROOT}/.venv/bin/python}"
+source "${PROJECT_ROOT}/scripts/lib/system_wake_window.sh"
 
 TOTAL_CYCLES="${TOTAL_CYCLES:-30}"
 SCANNER_INTERVAL_SECONDS="${SCANNER_INTERVAL_SECONDS:-60}"
@@ -59,6 +60,12 @@ log "Inferencia social: a cada ${SOCIAL_EVERY_CYCLES} rodadas"
 log "Log da sessao: ${SESSION_LOG}"
 
 for ((cycle = 1; cycle <= TOTAL_CYCLES; cycle++)); do
+    if ! system_wake_is_active; then
+        wait_seconds="$(system_wake_seconds_until_open)"
+        log "Fora da vigilia global; aguardando ${wait_seconds}s para reabrir"
+        sleep "${wait_seconds}"
+    fi
+
     log "Rodada ${cycle}/${TOTAL_CYCLES}: iniciando token scanner"
     run_module "src.modules.token_scanner"
 
