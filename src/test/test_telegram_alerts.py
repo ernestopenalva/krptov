@@ -119,6 +119,34 @@ def fake_analysis(rank=80, signature="author_followers_high"):
 
 
 class TelegramNotifierTests(unittest.TestCase):
+    def test_post_found_message_keeps_author_context(self):
+        alert = {
+            "chain_id": "base",
+            "token_address": "0x1111111111111111111111111111111111111111",
+            "posts_found": 1,
+            "alert_rank": 0,
+            "alert_reasons": ["post_found"],
+            "author_username": "small_author",
+            "author_followers": 12,
+            "author_verified": False,
+            "trigger_posts": [
+                {
+                    "author_username": "small_author",
+                    "url": "https://x.com/small_author/status/1",
+                }
+            ],
+        }
+
+        message = telegram_notifier.build_alert_message(
+            alert,
+            {"token_symbol": "TEST", "quote_token": "WETH"},
+        )
+
+        self.assertIn("post mencionando o token encontrado no X", message)
+        self.assertIn("<b>Posts encontrados:</b> 1", message)
+        self.assertIn("<b>Seguidores:</b> 12", message)
+        self.assertIn("https://x.com/small_author/status/1", message)
+
     def test_dry_run_does_not_call_telegram(self):
         session = FakeTelegramSession()
 
@@ -273,7 +301,7 @@ class TelegramNotifierTests(unittest.TestCase):
             '<b>Autor:</b> <a href="https://x.com/BlackhatEmpire">@BlackhatEmpire</a>',
             message,
         )
-        self.assertNotIn("<b>Seguidores:</b>", message)
+        self.assertIn("<b>Seguidores:</b> 7.528", message)
         self.assertNotIn("Maior audiência no resultado", message)
         self.assertIn(
             f"<b>GMGN:</b> https://gmgn.ai/eth/token/{token_address}",
@@ -317,7 +345,7 @@ class TelegramNotifierTests(unittest.TestCase):
             message,
         )
         self.assertNotIn("id=", message)
-        self.assertNotIn("<b>Seguidores:</b>", message)
+        self.assertIn("<b>Seguidores:</b> 7.161", message)
         self.assertNotIn("Maior audiência no resultado", message)
 
 
@@ -615,7 +643,50 @@ class SocialInferenceTelegramTests(unittest.TestCase):
 
         self.assertEqual(analysis["alert_rank"], 0)
         self.assertFalse(analysis["affiliation_found"])
-        self.assertEqual(analysis["alert_reasons"], [])
+        self.assertEqual(analysis["alert_reasons"], ["post_found"])
+        self.assertEqual(analysis["trigger_posts"][0]["tweet_id"], "1")
+        self.assertTrue(social_inference.should_generate_alert({}, analysis))
+
+    def test_any_post_alerts_without_followers_or_badges(self):
+        payload = {
+            "data": [
+                {
+                    "id": "low-signal-post",
+                    "author_id": "u1",
+                    "text": "CA 0xabc",
+                    "created_at": "2026-06-10T12:00:00Z",
+                    "public_metrics": {},
+                }
+            ],
+            "includes": {
+                "users": [
+                    {
+                        "id": "u1",
+                        "username": "small_author",
+                        "public_metrics": {"followers_count": 12},
+                    }
+                ]
+            },
+        }
+
+        analysis = social_inference.build_social_analysis(payload, social_inference.DEFAULT_CONFIG)
+
+        self.assertEqual(analysis["posts_found"], 1)
+        self.assertEqual(analysis["alert_rank"], 0)
+        self.assertEqual(analysis["alert_reasons"], ["post_found"])
+        self.assertEqual(analysis["origin_summary"]["author_username"], "small_author")
+        self.assertEqual(analysis["origin_summary"]["author_followers"], 12)
+        self.assertEqual(analysis["trigger_posts"][0]["author_username"], "small_author")
+        self.assertTrue(social_inference.should_generate_alert({}, analysis))
+
+    def test_zero_posts_does_not_alert(self):
+        analysis = social_inference.build_social_analysis(
+            {"data": [], "includes": {"users": []}},
+            social_inference.DEFAULT_CONFIG,
+        )
+
+        self.assertEqual(analysis["posts_found"], 0)
+        self.assertFalse(social_inference.should_generate_alert({}, analysis))
 
     def test_qualified_affiliation_still_ranks(self):
         payload = {
@@ -646,6 +717,7 @@ class SocialInferenceTelegramTests(unittest.TestCase):
         self.assertEqual(analysis["alert_rank"], 100)
         self.assertTrue(analysis["affiliation_found"])
         self.assertIn("author_affiliation_found", analysis["alert_reasons"])
+        self.assertIn("post_found", analysis["alert_reasons"])
         self.assertEqual(analysis["origin_summary"]["author_affiliation_name"], "Sigma")
         self.assertEqual(analysis["origin_summary"]["author_affiliation_username"], "SigmaTrading")
 

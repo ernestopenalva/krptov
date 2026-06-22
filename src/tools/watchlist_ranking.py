@@ -722,8 +722,9 @@ def print_summary(watchlist, entries, args, previous_positions):
     policy = load_social_victor_policy()
     post_budget = load_post_budget_summary(now_brt=current_brt)
     usage_date = post_budget.get("usage_date") if post_budget else current_brt.strftime("%Y-%m-%d")
+    history_date = current_brt.strftime("%Y-%m-%d")
     last_cycle = load_last_social_cycle_summary(
-        usage_date,
+        history_date,
         new_limit=max_new_tokens,
         active_limit=max_active_tokens,
     )

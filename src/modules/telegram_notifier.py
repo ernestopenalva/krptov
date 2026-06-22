@@ -394,6 +394,7 @@ def format_alert_reason(reason, alert=None):
         return "autor afiliado a uma organização"
 
     reason_labels = {
+        "post_found": "post mencionando o token encontrado no X",
         "author_verified_business": "conta verificada como organização",
         "verified_type_business": "conta verificada como organização",
         "author_verified_government": "conta verificada como governo",
@@ -463,15 +464,25 @@ def build_alert_message(alert, entry=None):
     gmgn_url = build_gmgn_url(chain_id, token_address)
     post_url = trigger_post.get("url")
     affiliation = best_affiliation_label(alert)
+    posts_found = alert.get("posts_found")
+    if posts_found is None:
+        posts_found = len(alert.get("trigger_posts") or [])
 
     lines = [
         "<b>KRPTO-V | Alerta social</b>",
         f"<b>Rank:</b> {escape_html(alert.get('alert_rank', 'indisponivel'))}",
+        f"<b>Posts encontrados:</b> {escape_html(posts_found)}",
         f"<b>Token:</b> {escape_html(pair_label)}",
         f"<b>Chain:</b> {escape_html(chain_id)}",
         f"<b>Motivos:</b>{reason_text}",
         f"<b>Autor:</b> {format_x_user_link(author)}",
     ]
+
+    if alert.get("author_followers") is not None:
+        lines.append(f"<b>Seguidores:</b> {escape_html(format_number(alert.get('author_followers') or 0))}")
+    verified_type = alert.get("author_verified_type")
+    if verified_type or alert.get("author_verified"):
+        lines.append(f"<b>Verificacao:</b> {escape_html(verified_type or 'verificada')}")
 
     if affiliation:
         lines.append(f"<b>Afiliação:</b> {format_affiliation_html(affiliation)}")

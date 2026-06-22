@@ -20,7 +20,7 @@ from src.modules import telegram_notifier
 
 X_SEARCH_RECENT_URL = "https://api.x.com/2/tweets/search/recent"
 X_USER_BY_USERNAME_URL = "https://api.x.com/2/users/by/username/{username}"
-SOCIAL_INFERENCE_VERSION = "krptov-social-inference-v1.1-social-victor-2026-06-21"
+SOCIAL_INFERENCE_VERSION = "krptov-social-inference-v1.1-social-victor-any-post-2026-06-22"
 X_USER_FIELDS = "username,name,description,created_at,verified,verified_type,is_identity_verified,affiliation,public_metrics,protected,parody,url"
 
 STATUS_NOVO = "novo"
@@ -1166,6 +1166,40 @@ def build_trigger_posts(user, tweets, reasons, limit=3):
     return posts
 
 
+def complete_trigger_posts(trigger_posts, tweets, users_by_id, limit=3):
+    completed = list(trigger_posts or [])
+    seen_ids = {str(post.get("tweet_id")) for post in completed if post.get("tweet_id")}
+
+    for tweet in tweets:
+        tweet_id = tweet.get("id")
+        if tweet_id and str(tweet_id) in seen_ids:
+            continue
+        user = users_by_id.get(tweet.get("author_id")) or {}
+        username = user.get("username")
+        completed.append(
+            {
+                "tweet_id": tweet_id,
+                "created_at": tweet.get("created_at"),
+                "text": tweet.get("text"),
+                "public_metrics": tweet.get("public_metrics") or {},
+                "author_id": tweet.get("author_id"),
+                "author_username": username,
+                "url": (
+                    f"https://x.com/{username}/status/{tweet_id}"
+                    if username and tweet_id
+                    else f"https://x.com/i/web/status/{tweet_id}" if tweet_id else None
+                ),
+                "reasons": ["post_found"],
+            }
+        )
+        if tweet_id:
+            seen_ids.add(str(tweet_id))
+        if len(completed) >= limit:
+            break
+
+    return completed[:limit]
+
+
 def build_social_analysis(response_payload, config, bearer_token=None):
     tweets = response_payload.get("data") or []
     users = response_payload.get("includes", {}).get("users", [])
@@ -1254,9 +1288,20 @@ def build_social_analysis(response_payload, config, bearer_token=None):
             if operator_reasons:
                 trigger_posts.extend(build_trigger_posts(user, tweets, operator_reasons))
 
-    alert_signature = None
-    if alert_rank > 0:
-        alert_signature = "|".join(sorted(set(alert_reasons)))
+    if tweets:
+        alert_reasons.append("post_found")
+        if origin_summary["origin_type"] == "unknown":
+            fallback_user = None
+            if best_followers_author_summary:
+                fallback_user = users_by_id.get(best_followers_author_summary.get("id"))
+            if fallback_user is None:
+                fallback_user = users_by_id.get(tweets[0].get("author_id"))
+            if fallback_user:
+                origin_summary = build_origin_summary(fallback_user)
+
+    trigger_posts = complete_trigger_posts(trigger_posts, tweets, users_by_id)
+    alert_reasons = sorted(set(alert_reasons))
+    alert_signature = "|".join(alert_reasons) if alert_reasons else None
 
     top_followers_author_summaries = sorted(
         top_followers_author_summaries,
@@ -1280,9 +1325,9 @@ def build_social_analysis(response_payload, config, bearer_token=None):
         "best_followers_author_summary": best_followers_author_summary,
         "top_followers_author_summaries": top_followers_author_summaries,
         "best_affiliation_author_summary": best_affiliation_author_summary,
-        "trigger_posts": trigger_posts[:3],
+        "trigger_posts": trigger_posts,
         "alert_rank": alert_rank,
-        "alert_reasons": sorted(set(alert_reasons)),
+        "alert_reasons": alert_reasons,
         "alert_signature": alert_signature,
     }
 
@@ -1426,6 +1471,8 @@ def build_alert(
         "watchlist_key": watchlist_key or entry.get("watchlist_key"),
         "status_before": status_before,
         "status_after": entry.get("status"),
+        "posts_found": analysis["posts_found"],
+        "users_found": analysis["users_found"],
         "alert_rank": analysis["alert_rank"],
         "alert_reason": analysis["alert_signature"],
         "alert_signature": analysis["alert_signature"],
@@ -1632,25 +1679,7 @@ def register_social_check_usage(
 
 
 def should_generate_alert(entry, analysis):
-    current_rank = int(analysis["alert_rank"] or 0)
-    best_rank = int(entry.get("best_alert_rank") or 0)
-    current_signature = analysis.get("alert_signature")
-
-    if current_rank <= 0:
-        return False
-    if current_rank > best_rank:
-        return True
-    if current_rank != best_rank:
-        return False
-    if entry.get("telegram_alert_sent") is True and entry.get("telegram_alert_signature") == current_signature:
-        return False
-
-    previous_attempt_failed = (
-        entry.get("telegram_alert_attempted_at")
-        and entry.get("telegram_alert_sent") is not True
-        and entry.get("last_alert_signature") == current_signature
-    )
-    return bool(previous_attempt_failed)
+    return int(analysis.get("posts_found") or 0) > 0
 
 
 def apply_alert(entry, analysis, current_time):
