@@ -219,11 +219,27 @@ class SocialEligibilityTests(unittest.TestCase):
                 "social_status": "pendente",
                 "market_score": 90,
             },
+            "base:0x4444444444444444444444444444444444444444": {
+                "chain": "base",
+                "chain_id": "base",
+                "token_address": "0x4444444444444444444444444444444444444444",
+                "status": "novo",
+                "social_status": "pendente",
+                "market_score": 80,
+            },
+            "base:0x5555555555555555555555555555555555555555": {
+                "chain": "base",
+                "chain_id": "base",
+                "token_address": "0x5555555555555555555555555555555555555555",
+                "status": "novo",
+                "social_status": "pendente",
+                "market_score": 70,
+            },
         }
         config = {
             **social_inference.DEFAULT_CONFIG,
             "max_tokens_per_cycle": 0,
-            "max_new_tokens_per_cycle": 1,
+            "max_new_tokens_per_cycle": 2,
             "max_active_tokens_per_cycle": 0,
         }
 
@@ -235,6 +251,7 @@ class SocialEligibilityTests(unittest.TestCase):
                 "0x1111111111111111111111111111111111111111",
                 "0x3333333333333333333333333333333333333333",
                 "0x2222222222222222222222222222222222222222",
+                "0x4444444444444444444444444444444444444444",
             ],
         )
 

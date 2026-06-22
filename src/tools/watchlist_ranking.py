@@ -157,7 +157,7 @@ def load_social_victor_policy(path=CONFIG_FILE):
     policy = {
         "cycle_interval_seconds": 120,
         "monitoring_window_hours": 2,
-        "max_new_tokens_per_cycle": 1,
+        "max_new_tokens_per_cycle": 2,
         "max_active_tokens_per_cycle": 0,
     }
     if not path.exists():
