@@ -315,6 +315,121 @@ class MarketRankerBatchTests(unittest.TestCase):
             self.assertTrue(archive_file.exists())
             self.assertIn("retention_cap_low_rank", archive_file.read_text(encoding="utf-8"))
 
+    def test_watchlist_retention_removes_finalized_entries(self):
+        current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            watchlist_file = root / "watchlist.json"
+            lock_file = root / "watchlist.lock"
+            archive_file = root / "archive.jsonl"
+            alert_token = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            lowliq_token = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            active_token = "0xcccccccccccccccccccccccccccccccccccccccc"
+            alert_key = f"ethereum:{alert_token}"
+            lowliq_key = f"ethereum:{lowliq_token}"
+            active_key = f"ethereum:{active_token}"
+            watchlist_file.write_text(
+                json.dumps(
+                    {
+                        alert_key: {
+                            **token_entry(alert_token, alert_key),
+                            "status": "ativo",
+                            "social_status": "concluido",
+                            "social_completed_reason": "alert_sent",
+                            "telegram_alert_sent": True,
+                            "market_score": 10,
+                        },
+                        lowliq_key: {
+                            **token_entry(lowliq_token, lowliq_key),
+                            "status": "descarte",
+                            "social_status": "concluido",
+                            "social_completed_reason": "low_quote_liquidity",
+                            "market_score": 90,
+                        },
+                        active_key: {
+                            **token_entry(active_token, active_key),
+                            "status": "ativo",
+                            "social_status": "ativo",
+                            "market_score": 1,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = {
+                "market_ranker": {
+                    "watchlist_retention": {
+                        "enabled": True,
+                        "max_entries": 500,
+                        "archive_removed": True,
+                        "archive_file": str(archive_file),
+                        "remove_finalized_entries": True,
+                    }
+                }
+            }
+
+            with patch.object(market_ranker, "WATCHLIST_FILE", watchlist_file), patch.object(
+                market_ranker, "WATCHLIST_LOCK_FILE", lock_file
+            ):
+                summary = market_ranker.apply_watchlist_retention(config, current_time)
+
+            updated = json.loads(watchlist_file.read_text(encoding="utf-8"))
+            archive_text = archive_file.read_text(encoding="utf-8")
+            self.assertEqual(summary["removed"], 2)
+            self.assertNotIn(alert_key, updated)
+            self.assertNotIn(lowliq_key, updated)
+            self.assertIn(active_key, updated)
+            self.assertIn("watchlist_finalized_alert_sent", archive_text)
+            self.assertIn("watchlist_finalized_discarded_low_quote_liquidity", archive_text)
+
+    def test_watchlist_retention_can_keep_finalized_entries_when_disabled(self):
+        current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            watchlist_file = root / "watchlist.json"
+            lock_file = root / "watchlist.lock"
+            archive_file = root / "archive.jsonl"
+            alert_token = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            alert_key = f"ethereum:{alert_token}"
+            watchlist_file.write_text(
+                json.dumps(
+                    {
+                        alert_key: {
+                            **token_entry(alert_token, alert_key),
+                            "status": "ativo",
+                            "social_status": "concluido",
+                            "social_completed_reason": "alert_sent",
+                            "telegram_alert_sent": True,
+                            "market_score": 10,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = {
+                "market_ranker": {
+                    "watchlist_retention": {
+                        "enabled": True,
+                        "max_entries": 500,
+                        "archive_removed": True,
+                        "archive_file": str(archive_file),
+                        "remove_finalized_entries": False,
+                    }
+                }
+            }
+
+            with patch.object(market_ranker, "WATCHLIST_FILE", watchlist_file), patch.object(
+                market_ranker, "WATCHLIST_LOCK_FILE", lock_file
+            ):
+                summary = market_ranker.apply_watchlist_retention(config, current_time)
+
+            updated = json.loads(watchlist_file.read_text(encoding="utf-8"))
+            self.assertEqual(summary["removed"], 0)
+            self.assertIn(alert_key, updated)
+            self.assertFalse(archive_file.exists())
+
     def test_ranked_buffer_token_replaces_lower_ranked_watchlist_entry(self):
         current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
 

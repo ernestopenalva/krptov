@@ -85,6 +85,7 @@ DEFAULT_CONFIG = {
             "max_entries": 500,
             "archive_removed": True,
             "archive_file": "data/watchlist_archive.jsonl",
+            "remove_finalized_entries": True,
             "unranked_retention_hours": 6,
             "pending_retention_hours": 12,
             "blocked_old_market_retention_hours": 6,
@@ -1414,15 +1415,65 @@ def entry_age_hours(entry, current_time):
 
 
 def is_retention_protected(entry):
+    if is_watchlist_finalized(entry):
+        return False
+
     return (
-        entry.get("status") == STATUS_ATIVO
-        or entry.get("social_status") == STATUS_ATIVO
+        entry.get("social_status") == STATUS_ATIVO
         or entry.get("monitor_status") == STATUS_ATIVO
-        or entry.get("telegram_alert_sent") is True
+        or (
+            entry.get("status") == STATUS_ATIVO
+            and entry.get("social_status") != "concluido"
+            and not entry.get("social_completed_reason")
+        )
     )
 
 
+def is_watchlist_finalized(entry):
+    if not isinstance(entry, dict):
+        return False
+
+    if entry.get("status") == "descarte":
+        return True
+
+    if entry.get("telegram_alert_sent") is True:
+        return True
+
+    if entry.get("social_completed_reason") == "alert_sent":
+        return True
+
+    if entry.get("social_status") == "concluido" and entry.get("social_completed_reason"):
+        return True
+
+    return False
+
+
+def finalized_retention_reason(entry):
+    if not is_watchlist_finalized(entry):
+        return None
+
+    if entry.get("telegram_alert_sent") is True or entry.get("social_completed_reason") == "alert_sent":
+        return "watchlist_finalized_alert_sent"
+
+    if entry.get("status") == "descarte":
+        completed_reason = entry.get("social_completed_reason") or entry.get("discarded_reason")
+        if completed_reason:
+            return f"watchlist_finalized_discarded_{completed_reason}"
+        return "watchlist_finalized_discarded"
+
+    completed_reason = entry.get("social_completed_reason")
+    if completed_reason:
+        return f"watchlist_finalized_social_{completed_reason}"
+
+    return "watchlist_finalized"
+
+
 def retention_reason(entry, config, current_time):
+    if config.get("remove_finalized_entries", True):
+        finalized_reason = finalized_retention_reason(entry)
+        if finalized_reason:
+            return finalized_reason
+
     if is_retention_protected(entry):
         return None
 
