@@ -1575,6 +1575,47 @@ def load_alerts():
     return []
 
 
+def alert_token_identity(chain_id, token_address):
+    normalized_address = normalize_ethereum_address(token_address)
+    if not chain_id or not normalized_address:
+        return None
+    return f"{chain_id}:{normalized_address}"
+
+
+def alert_record_token_identity(alert):
+    if not isinstance(alert, dict):
+        return None
+
+    chain_id = alert.get("chain_id") or alert.get("chain")
+    token_address = alert.get("token_address")
+    if not token_address:
+        _, token_address = split_watchlist_key(alert.get("watchlist_key"))
+    return alert_token_identity(chain_id, token_address)
+
+
+def alerted_token_identities(alerts):
+    identities = set()
+    for alert in alerts or []:
+        if not isinstance(alert, dict):
+            continue
+        if alert.get("telegram_alert_sent") is not True:
+            continue
+        identity = alert_record_token_identity(alert)
+        if identity:
+            identities.add(identity)
+    return identities
+
+
+def mark_duplicate_token_alert_suppressed(entry, analysis, current_time, prior_identity):
+    apply_alert(entry, analysis, current_time)
+    finish_after_alert(entry, current_time)
+    entry["telegram_alert_sent"] = True
+    entry["telegram_alert_signature"] = analysis.get("alert_signature")
+    entry["telegram_alert_suppressed_duplicate"] = True
+    entry["telegram_alert_duplicate_identity"] = prior_identity
+    entry["telegram_alert_suppressed_at"] = to_iso(current_time)
+
+
 def daily_usage_file(usage_date):
     return DATA_DIR / f"social_inference_usage_{usage_date}.json"
 
@@ -2003,6 +2044,7 @@ def run_cycle(config_file=CONFIG_FILE):
         return snapshot
 
     alerts = load_alerts()
+    alerted_identities = alerted_token_identities(alerts)
     daily_usage = load_daily_usage(usage_date)
     recent_posts = load_recent_posts(current_time)
     telegram_config = config.get("telegram_alerts") or {}
@@ -2173,6 +2215,29 @@ def run_cycle(config_file=CONFIG_FILE):
 
             alert_generated = False
             if should_generate_alert(entry, analysis):
+                token_alert_identity = alert_token_identity(chain_id, normalized_address)
+                if token_alert_identity and token_alert_identity in alerted_identities:
+                    mark_duplicate_token_alert_suppressed(
+                        entry,
+                        analysis,
+                        current_time,
+                        token_alert_identity,
+                    )
+                    alert_generated = False
+                    history_record = build_history_record(
+                        token_address=normalized_address,
+                        status_before=status_before,
+                        entry=entry,
+                        analysis=analysis,
+                        alert_generated=False,
+                        current_time=current_time,
+                        watchlist_key=watchlist_key,
+                    )
+                    history_record["duplicate_token_alert_suppressed"] = True
+                    history_record["duplicate_token_alert_identity"] = token_alert_identity
+                    append_jsonl(DATA_DIR / f"social_inference_{date_stamp}.jsonl", history_record)
+                    continue
+
                 apply_alert(entry, analysis, current_time)
                 finish_after_alert(entry, current_time)
                 raw_alert_posts_file = save_alert_posts_snapshot(
@@ -2210,6 +2275,9 @@ def run_cycle(config_file=CONFIG_FILE):
                 else:
                     mark_telegram_disabled(entry, alert, analysis)
                 alerts.append(alert)
+                token_alert_identity = alert_record_token_identity(alert)
+                if token_alert_identity and alert.get("telegram_alert_sent") is True:
+                    alerted_identities.add(token_alert_identity)
                 append_jsonl(DATA_DIR / f"social_alerts_{date_stamp}.jsonl", alert)
                 alerts_generated += 1
                 alert_generated = True

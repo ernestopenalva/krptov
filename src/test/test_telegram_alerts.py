@@ -598,6 +598,36 @@ class SocialInferenceTelegramTests(unittest.TestCase):
             self.assertEqual(snapshot["alerts_generated"], 0)
             self.assertTrue(entry["telegram_alert_sent"])
 
+    def test_duplicate_token_alert_is_suppressed_after_watchlist_reentry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            token_address = "0x1111111111111111111111111111111111111111"
+            alerts_file = root / "social_alerts.json"
+            alerts_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "timestamp": "2026-06-05T11:55:00",
+                            "chain_id": "ethereum",
+                            "token_address": token_address,
+                            "watchlist_key": f"ethereum:{token_address}",
+                            "telegram_alert_sent": True,
+                            "telegram_message_id": 123,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            send_mock = Mock(return_value={"success": True, "message_id": 999, "error": None})
+
+            snapshot, entry = self.run_social_cycle(root, send_mock)
+
+            self.assertEqual(send_mock.call_count, 0)
+            self.assertEqual(snapshot["alerts_generated"], 0)
+            self.assertTrue(entry["telegram_alert_sent"])
+            self.assertTrue(entry["telegram_alert_suppressed_duplicate"])
+            self.assertEqual(entry["social_completed_reason"], "alert_sent")
+
     def test_rank_upgrade_is_not_sent_after_social_completion(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
