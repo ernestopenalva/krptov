@@ -171,6 +171,92 @@ class WatchlistRankingTests(unittest.TestCase):
             "alert 1/2 | maxchk legado 1/1",
         )
 
+    def test_archived_social_entries_feed_completion_summary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive = root / "watchlist_archive.jsonl"
+            archive.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "archived_at_utc": "2026-06-15T12:00:00Z",
+                                "reason": "watchlist_finalized_alert_sent",
+                                "entry": {
+                                    "social_completed_reason": "alert_sent",
+                                    "social_monitoring_completed_at": "2026-06-15T08:30:00-03:00",
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "archived_at_utc": "2026-06-14T12:00:00Z",
+                                "reason": "watchlist_finalized_discarded_low_quote_liquidity",
+                                "entry": {},
+                            }
+                        ),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            entries = watchlist_ranking.load_archived_social_entries(path=archive)
+            total, today = watchlist_ranking.social_completion_summary(
+                entries,
+                current_date=watchlist_ranking.datetime(2026, 6, 15).date(),
+            )
+
+        self.assertEqual(total["alert_sent"], 1)
+        self.assertEqual(today["alert_sent"], 1)
+        self.assertEqual(total["low_quote_liquidity"], 1)
+
+    def test_social_alert_summary_counts_aggregate_and_today_jsonl(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            data_dir = root / "data"
+            data_dir.mkdir()
+            aggregate = data_dir / "social_alerts.json"
+            today_jsonl = data_dir / "social_alerts_2026-06-15.jsonl"
+            aggregate.write_text(
+                json.dumps(
+                    [
+                        {
+                            "timestamp": "2026-06-14T12:00:00-03:00",
+                            "token_address": "0x1111111111111111111111111111111111111111",
+                            "chain_id": "ethereum",
+                            "telegram_alert_sent": True,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            today_jsonl.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-06-15T12:00:00-03:00",
+                        "token_address": "0x2222222222222222222222222222222222222222",
+                        "chain_id": "base",
+                        "telegram_alert_sent": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            original_root = watchlist_ranking.PROJECT_ROOT
+            original_alerts = watchlist_ranking.SOCIAL_ALERTS_FILE
+            watchlist_ranking.PROJECT_ROOT = root
+            watchlist_ranking.SOCIAL_ALERTS_FILE = aggregate
+            try:
+                summary = watchlist_ranking.social_alert_summary(
+                    watchlist_ranking.datetime(2026, 6, 15).date()
+                )
+            finally:
+                watchlist_ranking.PROJECT_ROOT = original_root
+                watchlist_ranking.SOCIAL_ALERTS_FILE = original_alerts
+
+        self.assertEqual(summary["today"], 1)
+        self.assertEqual(summary["total"], 2)
+
     def test_next_bucket_uses_current_brasilia_time(self):
         current = watchlist_ranking.datetime(
             2026,

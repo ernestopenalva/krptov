@@ -65,7 +65,7 @@ DEFAULT_CONFIG = {
     "cycle_interval_seconds": 120,
     "max_new_tokens_per_day": 0,
     "max_tokens_per_cycle": 0,
-    "max_new_tokens_per_cycle": 2,
+    "max_new_tokens_per_cycle": 3,
     "max_active_tokens_per_cycle": 0,
     "wake_window": {
         "enabled": True,

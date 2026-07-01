@@ -13,6 +13,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WATCHLIST_FILE = PROJECT_ROOT / "data" / "watchlist.json"
 CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
 SOCIAL_LATEST_FILE = PROJECT_ROOT / "data" / "social_inference_latest.json"
+SOCIAL_ALERTS_FILE = PROJECT_ROOT / "data" / "social_alerts.json"
+WATCHLIST_ARCHIVE_FILE = PROJECT_ROOT / "data" / "watchlist_archive.jsonl"
 BRASILIA_TZ = ZoneInfo("America/Sao_Paulo")
 
 
@@ -64,12 +66,35 @@ def load_json_file(path, default=None):
         return default
 
 
+def load_jsonl_file(path):
+    if not path.exists():
+        return []
+
+    records = []
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            for line in file:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict):
+                    records.append(record)
+    except OSError:
+        return []
+
+    return records
+
+
 def load_social_settings(
     path=CONFIG_FILE,
     default_checks=3,
     default_min_age=0,
     default_min_quote_liquidity=1,
-    default_max_new_tokens=10,
+    default_max_new_tokens=3,
     default_max_active_tokens=40,
 ):
     if not path.exists():
@@ -157,7 +182,7 @@ def load_social_victor_policy(path=CONFIG_FILE):
     policy = {
         "cycle_interval_seconds": 120,
         "monitoring_window_hours": 2,
-        "max_new_tokens_per_cycle": 2,
+        "max_new_tokens_per_cycle": 3,
         "max_active_tokens_per_cycle": 0,
     }
     if not path.exists():
@@ -202,6 +227,12 @@ def social_history_file(usage_date):
     if not usage_date:
         return None
     return PROJECT_ROOT / "data" / f"social_inference_{usage_date}.jsonl"
+
+
+def social_alerts_jsonl_file(usage_date):
+    if not usage_date:
+        return None
+    return PROJECT_ROOT / "data" / f"social_alerts_{usage_date}.jsonl"
 
 
 def next_bucket_time(now_brt, bucket_minutes, usage_date=None):
@@ -679,6 +710,83 @@ def social_completion_summary(entries, current_date):
     return total, today
 
 
+def load_archived_social_entries(path=WATCHLIST_ARCHIVE_FILE):
+    entries = []
+    for record in load_jsonl_file(path):
+        entry = record.get("entry")
+        if not isinstance(entry, dict):
+            continue
+        completed_reason = entry.get("social_completed_reason")
+        if not completed_reason:
+            reason = record.get("reason")
+            if reason == "watchlist_finalized_alert_sent":
+                completed_reason = "alert_sent"
+            elif isinstance(reason, str) and reason.startswith("watchlist_finalized_discarded_"):
+                completed_reason = reason.replace("watchlist_finalized_discarded_", "", 1)
+            elif isinstance(reason, str) and reason.startswith("watchlist_finalized_social_"):
+                completed_reason = reason.replace("watchlist_finalized_social_", "", 1)
+        if not completed_reason:
+            continue
+
+        entries.append(
+            {
+                "social_completed_reason": completed_reason,
+                "social_monitoring_completed_at": (
+                    entry.get("social_monitoring_completed_at")
+                    or entry.get("telegram_alert_sent_at")
+                    or record.get("archived_at_utc")
+                ),
+            }
+        )
+    return entries
+
+
+def load_alert_records(current_date=None):
+    alerts = load_json_file(SOCIAL_ALERTS_FILE, default=[])
+    if isinstance(alerts, dict):
+        alerts = alerts.get("alerts", [])
+    if not isinstance(alerts, list):
+        alerts = []
+    alerts = [alert for alert in alerts if isinstance(alert, dict)]
+
+    # If the aggregate file is absent or stale, still show today's JSONL alerts.
+    if current_date:
+        date_text = current_date.isoformat()
+        known = {
+            (
+                alert.get("timestamp"),
+                alert.get("chain_id"),
+                alert.get("token_address"),
+                alert.get("telegram_message_id"),
+            )
+            for alert in alerts
+        }
+        for alert in load_jsonl_file(social_alerts_jsonl_file(date_text)):
+            key = (
+                alert.get("timestamp"),
+                alert.get("chain_id"),
+                alert.get("token_address"),
+                alert.get("telegram_message_id"),
+            )
+            if key in known:
+                continue
+            alerts.append(alert)
+            known.add(key)
+
+    return alerts
+
+
+def social_alert_summary(current_date):
+    alerts = load_alert_records(current_date=current_date)
+    sent_alerts = [alert for alert in alerts if alert.get("telegram_alert_sent") is True]
+    today = 0
+    for alert in sent_alerts:
+        timestamp = parse_iso_datetime(alert.get("telegram_alert_sent_at") or alert.get("timestamp"))
+        if timestamp and timestamp.date() == current_date:
+            today += 1
+    return {"today": today, "total": len(sent_alerts)}
+
+
 def format_social_completion_summary(total, today):
     if not total:
         return "nenhuma"
@@ -728,7 +836,12 @@ def print_summary(watchlist, entries, args, previous_positions):
         new_limit=max_new_tokens,
         active_limit=max_active_tokens,
     )
-    completion_total, completion_today = social_completion_summary(social_done, current_brt.date())
+    archived_social_done = load_archived_social_entries()
+    completion_total, completion_today = social_completion_summary(
+        social_done + archived_social_done,
+        current_brt.date(),
+    )
+    alert_summary = social_alert_summary(current_brt.date())
 
     print("=== KRPTO-V | Watchlist Ranking ===")
     print(f"Atualizado: {current_brt.isoformat(timespec='seconds')}")
@@ -755,11 +868,14 @@ def print_summary(watchlist, entries, args, previous_positions):
         print(
             f"Posts hoje: unicos {post_budget['posts_returned']}/{daily_total} | "
             f"brutos {post_budget['posts_returned_raw']} | "
-            f"restante {'sem limite' if remaining is None else remaining}"
+            f"restante {'sem limite' if remaining is None else remaining} | "
+            f"bucket {post_budget['bucket_used']}/{post_budget['bucket_target']} | "
+            f"proximo {post_budget['next_bucket']}"
         )
     print(f"Por chain: {dict(Counter(entry['chain'] for entry in all_entries))}")
     print(f"Status WL: {dict(Counter(entry['status'] for entry in all_entries))}")
     print(f"Status social: {dict(Counter(entry['social_status'] for entry in all_entries))}")
+    print(f"Alertas sociais hoje/total: {alert_summary['today']}/{alert_summary['total']}")
     print(f"Conclusao social hoje/total: {format_social_completion_summary(completion_total, completion_today)}")
     print(f"Social eligibility: {dict(Counter(entry['social_eligibility'] for entry in all_entries))}")
     if args.chain:
