@@ -430,6 +430,61 @@ class MarketRankerBatchTests(unittest.TestCase):
             self.assertIn(alert_key, updated)
             self.assertFalse(archive_file.exists())
 
+    def test_watchlist_retention_removes_blocked_old_market_immediately(self):
+        current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            watchlist_file = root / "watchlist.json"
+            lock_file = root / "watchlist.lock"
+            archive_file = root / "archive.jsonl"
+            old_market_token = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            eligible_token = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            old_market_key = f"ethereum:{old_market_token}"
+            eligible_key = f"ethereum:{eligible_token}"
+            watchlist_file.write_text(
+                json.dumps(
+                    {
+                        old_market_key: {
+                            **token_entry(old_market_token, old_market_key),
+                            "social_eligibility": "blocked_old_market",
+                            "social_eligibility_reason": "old_market",
+                            "social_eligibility_updated_at": "2026-06-06T12:00:00Z",
+                            "market_score": 90,
+                        },
+                        eligible_key: {
+                            **token_entry(eligible_token, eligible_key),
+                            "social_eligibility": "eligible",
+                            "market_score": 90,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = {
+                "market_ranker": {
+                    "watchlist_retention": {
+                        "enabled": True,
+                        "max_entries": 500,
+                        "archive_removed": True,
+                        "archive_file": str(archive_file),
+                        "blocked_old_market_retention_hours": 0,
+                    }
+                }
+            }
+
+            with patch.object(market_ranker, "WATCHLIST_FILE", watchlist_file), patch.object(
+                market_ranker, "WATCHLIST_LOCK_FILE", lock_file
+            ):
+                summary = market_ranker.apply_watchlist_retention(config, current_time)
+
+            updated = json.loads(watchlist_file.read_text(encoding="utf-8"))
+            archive_text = archive_file.read_text(encoding="utf-8")
+            self.assertEqual(summary["removed"], 1)
+            self.assertNotIn(old_market_key, updated)
+            self.assertIn(eligible_key, updated)
+            self.assertIn("retention_blocked_old_market", archive_text)
+
     def test_ranked_buffer_token_replaces_lower_ranked_watchlist_entry(self):
         current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
 

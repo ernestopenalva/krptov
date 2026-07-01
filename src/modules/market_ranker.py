@@ -88,7 +88,7 @@ DEFAULT_CONFIG = {
             "remove_finalized_entries": True,
             "unranked_retention_hours": 6,
             "pending_retention_hours": 12,
-            "blocked_old_market_retention_hours": 6,
+            "blocked_old_market_retention_hours": 0,
             "low_score_retention_hours": 24,
             "low_score_threshold": 35,
         },

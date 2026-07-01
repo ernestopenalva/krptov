@@ -316,9 +316,23 @@ class SocialEligibilityTests(unittest.TestCase):
             state_file = root / "state.json"
             market_dir = root / "market_ranker"
             lock_file = root / "watchlist.lock"
+            archive_file = root / "watchlist_archive.jsonl"
             token_address = "0x1111111111111111111111111111111111111111"
             pool_address = "0x2222222222222222222222222222222222222222"
             watchlist_key = f"ethereum:{token_address}"
+            config = market_ranker.merge_dict(
+                market_ranker.DEFAULT_CONFIG,
+                {
+                    "market_ranker": {
+                        "watchlist_retention": {
+                            "enabled": True,
+                            "archive_removed": True,
+                            "archive_file": str(archive_file),
+                            "blocked_old_market_retention_hours": 0,
+                        }
+                    }
+                },
+            )
             watchlist_file.write_text(
                 json.dumps(
                     {
@@ -366,6 +380,8 @@ class SocialEligibilityTests(unittest.TestCase):
             ), patch.object(market_ranker, "STATE_FILE", state_file), patch.object(
                 market_ranker, "MARKET_RANKER_DATA_DIR", market_dir
             ), patch.object(
+                market_ranker, "load_config", return_value=config
+            ), patch.object(
                 market_ranker, "DATA_DIR", root
             ), patch.object(
                 market_ranker, "utc_now", return_value=current_time
@@ -376,7 +392,11 @@ class SocialEligibilityTests(unittest.TestCase):
                 )
 
             updated = json.loads(watchlist_file.read_text(encoding="utf-8"))
-            entry = updated[watchlist_key]
+            self.assertNotIn(watchlist_key, updated)
+            archived = [json.loads(line) for line in archive_file.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(archived), 1)
+            self.assertEqual(archived[0]["reason"], "retention_blocked_old_market")
+            entry = archived[0]["entry"]
             self.assertEqual(entry["social_eligibility"], "blocked_old_market")
             self.assertEqual(entry["social_eligibility_reason"], "old_market")
             self.assertEqual(entry["oldest_pair_created_at_utc"], "2026-06-03T10:00:00Z")
