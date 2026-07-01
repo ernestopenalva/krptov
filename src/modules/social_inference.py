@@ -46,6 +46,7 @@ SOCIAL_COMPLETED_REASON_LOW_QUOTE_LIQUIDITY = "low_quote_liquidity"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
+SOCIAL_BLACKLIST_FILE = PROJECT_ROOT / "config" / "social_author_blacklist.txt"
 DATA_DIR = PROJECT_ROOT / "data"
 LOGS_DIR = PROJECT_ROOT / "logs"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
@@ -342,6 +343,21 @@ def load_simple_yaml_social_inference(config_file):
     return load_simple_yaml_sections(config_file, {"social_inference"}).get("social_inference", {})
 
 
+def load_username_file(path=SOCIAL_BLACKLIST_FILE):
+    if not Path(path).exists():
+        return []
+
+    usernames = []
+    for raw_line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        username = normalize_username(line)
+        if username:
+            usernames.append(username)
+    return usernames
+
+
 def load_config(config_file=CONFIG_FILE):
     config = DEFAULT_CONFIG.copy()
 
@@ -361,6 +377,21 @@ def load_config(config_file=CONFIG_FILE):
         config.get("telegram_alerts", {}),
         loaded_sections.get("telegram_alerts", {}),
     )
+    external_blacklist = load_username_file()
+    if external_blacklist:
+        combined = list(config.get("excluded_author_usernames", []) or []) + external_blacklist
+        deduped = []
+        seen = set()
+        for username in combined:
+            normalized = normalize_username(username)
+            if not normalized:
+                continue
+            lowered = normalized.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            deduped.append(normalized)
+        config["excluded_author_usernames"] = deduped
     return config
 
 

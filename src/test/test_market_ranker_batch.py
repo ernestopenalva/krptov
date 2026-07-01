@@ -256,7 +256,7 @@ class MarketRankerBatchTests(unittest.TestCase):
         self.assertEqual(busd_metrics["quote_liquidity_symbol"], "BUSD")
         self.assertEqual(busd_metrics["quote_liquidity_usd"], 1000)
 
-    def test_watchlist_retention_applies_blind_cap_without_removing_protected(self):
+    def test_watchlist_retention_applies_rank_cap_without_removing_protected(self):
         current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -313,7 +313,75 @@ class MarketRankerBatchTests(unittest.TestCase):
             self.assertIn(f"ethereum:{high_token}", updated)
             self.assertNotIn(f"ethereum:{low_token}", updated)
             self.assertTrue(archive_file.exists())
-            self.assertIn("retention_blind_cap", archive_file.read_text(encoding="utf-8"))
+            self.assertIn("retention_cap_low_rank", archive_file.read_text(encoding="utf-8"))
+
+    def test_ranked_buffer_token_replaces_lower_ranked_watchlist_entry(self):
+        current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            watchlist_file = root / "watchlist.json"
+            buffer_file = root / "ranking_buffer.json"
+            lock_file = root / "watchlist.lock"
+            archive_file = root / "archive.jsonl"
+            old_token = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            new_token = "0xcccccccccccccccccccccccccccccccccccccccc"
+            old_key = f"ethereum:{old_token}"
+            new_key = f"ethereum:{new_token}"
+            watchlist_file.write_text(
+                json.dumps(
+                    {
+                        old_key: {
+                            **token_entry(old_token, old_key),
+                            "market_score": 50,
+                            "social_eligibility": "eligible",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            buffer_file.write_text(
+                json.dumps(
+                    {
+                        new_key: {
+                            **token_entry(new_token, new_key),
+                            "market_score": 90,
+                            "social_eligibility": "eligible",
+                            "ranking_attempts": 1,
+                            "ranking_first_seen_at_utc": "2026-06-06T11:59:00Z",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = {
+                "market_ranker": {
+                    "watchlist_retention": {
+                        "enabled": True,
+                        "max_entries": 1,
+                        "archive_removed": True,
+                        "archive_file": str(archive_file),
+                    },
+                    "ranking_buffer": {
+                        "file": str(buffer_file),
+                        "pending_grace_minutes": 15,
+                        "max_rank_attempts": 5,
+                    },
+                }
+            }
+
+            with patch.object(market_ranker, "WATCHLIST_FILE", watchlist_file), patch.object(
+                market_ranker, "WATCHLIST_LOCK_FILE", lock_file
+            ):
+                summary = market_ranker.apply_ranker_updates_and_selection({}, config, current_time)
+
+            updated = json.loads(watchlist_file.read_text(encoding="utf-8"))
+            updated_buffer = json.loads(buffer_file.read_text(encoding="utf-8"))
+            self.assertIn(new_key, updated)
+            self.assertNotIn(old_key, updated)
+            self.assertEqual(updated_buffer, {})
+            self.assertEqual(summary["promoted_from_buffer"], 1)
+            self.assertIn("watchlist_replaced_by_higher_ranked_token", archive_file.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

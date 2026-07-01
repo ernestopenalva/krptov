@@ -21,6 +21,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 POOL_SCANNER_DATA_DIR = DATA_DIR / "pool_scanner"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 WATCHLIST_LOCK_FILE = DATA_DIR / "watchlist.lock"
+RANKING_BUFFER_FILE = DATA_DIR / "ranking_buffer.json"
 
 RECONNECT_DELAY_SECONDS = 5
 NATIVE_ETH_ADDRESS = "0x0000000000000000000000000000000000000000"
@@ -355,6 +356,19 @@ def load_watchlist(path=WATCHLIST_FILE):
     return watchlist
 
 
+def load_ranking_buffer(path=RANKING_BUFFER_FILE):
+    if not path.exists():
+        return {}
+
+    with path.open("r", encoding="utf-8") as file:
+        buffer = json.load(file)
+
+    if not isinstance(buffer, dict):
+        raise ValueError("data/ranking_buffer.json precisa ser um dict indexado por token.")
+
+    return buffer
+
+
 def atomic_save_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -472,11 +486,40 @@ def build_watchlist_entry(chain, source, decoded_event, candidate, received_at_u
         "telegram_alert_sent": False,
         "scanner_validation_status": "approved",
         "scanner_validation_reason": "pool_with_known_quote_token",
+        "ranking_status": "pending_dexscreener",
+        "ranking_first_seen_at_utc": received_at_utc,
+        "ranking_last_seen_at_utc": received_at_utc,
+        "ranking_attempts": 0,
     }
     if source["type"] == "uniswap_v4_pool_manager":
         entry["pool_id"] = decoded_event["pool_id"]
         entry["pool_manager_address"] = source["pool_manager_address"]
     return entry
+
+
+def upsert_ranking_buffer_entry(entry):
+    watchlist_key = entry["watchlist_key"]
+
+    with watchlist_lock():
+        buffer = load_ranking_buffer()
+        existing = buffer.get(watchlist_key)
+
+        if isinstance(existing, dict):
+            existing["last_seen_at_utc"] = entry["last_seen_at_utc"]
+            existing["ranking_last_seen_at_utc"] = entry["ranking_last_seen_at_utc"]
+            existing["times_seen"] = int(existing.get("times_seen", 0)) + 1
+            for field in ("created_block", "created_tx", "pool_address", "pool_id"):
+                if entry.get(field) is not None:
+                    existing[field] = entry[field]
+            buffer[watchlist_key] = existing
+            action = "updated"
+        else:
+            buffer[watchlist_key] = entry
+            action = "created"
+
+        atomic_save_json(RANKING_BUFFER_FILE, buffer)
+
+    return action
 
 
 def upsert_watchlist_entry(entry):
@@ -609,8 +652,8 @@ def process_pool_log(chain_config, source, raw_log, dry_run):
         received_at_utc=received_at_utc,
         raw_log=raw_log,
     )
-    action = upsert_watchlist_entry(entry)
-    print(f"Watchlist: {action} | {entry['watchlist_key']}")
+    action = upsert_ranking_buffer_entry(entry)
+    print(f"Ranking buffer: {action} | {entry['watchlist_key']}")
     return action
 
 

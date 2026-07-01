@@ -42,18 +42,6 @@ social_inference:
     bucket_minutes: 32
     bucket_post_target: 10
 
-  excluded_author_usernames:
-    - dexsignals
-    - VioletLewisk
-    - CamposHodgez
-    - MarksBensont
-    - Kissingmanr
-    - BankrScanner2
-    - dex_event_live
-    - erickita96
-    - BaseAlphaOnly
-    - AspenAubreeg
-
   automated_author_usernames:
     - bankrscanner
 
@@ -120,3 +108,9 @@ market_ranker:
     blocked_old_market_retention_hours: 6
     low_score_retention_hours: 24
     low_score_threshold: 35
+
+  ranking_buffer:
+    enabled: true
+    file: "data/ranking_buffer.json"
+    pending_grace_minutes: 15
+    max_rank_attempts: 5

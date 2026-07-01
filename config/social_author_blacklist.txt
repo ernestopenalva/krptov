@@ -1,0 +1,18 @@
+# KRPTO-V social author blacklist.
+# One X/Twitter username per line. Leading "@" is optional.
+
+dexsignals
+VioletLewisk
+CamposHodgez
+MarksBensont
+Kissingmanr
+BankrScanner2
+dex_event_live
+erickita96
+BaseAlphaOnly
+AspenAubreeg
+wakisaik
+Renewstonem
+GrantsJoseph
+dexevents_miu
+Ghzz0018

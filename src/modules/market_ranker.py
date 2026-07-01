@@ -20,6 +20,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 MARKET_RANKER_DATA_DIR = DATA_DIR / "market_ranker"
 WATCHLIST_FILE = DATA_DIR / "watchlist.json"
 WATCHLIST_LOCK_FILE = DATA_DIR / "watchlist.lock"
+RANKING_BUFFER_FILE = DATA_DIR / "ranking_buffer.json"
 STATE_FILE = MARKET_RANKER_DATA_DIR / "state.json"
 OPS_ALERT_STATE_FILE = MARKET_RANKER_DATA_DIR / "ops_alert_state.json"
 
@@ -89,6 +90,12 @@ DEFAULT_CONFIG = {
             "blocked_old_market_retention_hours": 6,
             "low_score_retention_hours": 24,
             "low_score_threshold": 35,
+        },
+        "ranking_buffer": {
+            "enabled": True,
+            "file": "data/ranking_buffer.json",
+            "pending_grace_minutes": 15,
+            "max_rank_attempts": 5,
         },
         "social_eligibility": {
             "max_pool_age_minutes": 30,
@@ -302,6 +309,32 @@ def load_watchlist():
     return watchlist
 
 
+def ranking_buffer_config(config):
+    configured = market_ranker_config(config).get("ranking_buffer") or {}
+    defaults = DEFAULT_CONFIG["market_ranker"]["ranking_buffer"]
+    return merge_dict(defaults, configured)
+
+
+def ranking_buffer_path(config):
+    configured_file = (config or {}).get("file") or DEFAULT_CONFIG["market_ranker"]["ranking_buffer"]["file"]
+    if configured_file == DEFAULT_CONFIG["market_ranker"]["ranking_buffer"]["file"]:
+        if WATCHLIST_FILE != PROJECT_ROOT / "data" / "watchlist.json":
+            return WATCHLIST_FILE.parent / "ranking_buffer.json"
+        return RANKING_BUFFER_FILE
+    path = Path(configured_file)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path
+
+
+def load_ranking_buffer(config=None):
+    path = ranking_buffer_path(ranking_buffer_config(config or {}))
+    buffer = load_json(path, {})
+    if not isinstance(buffer, dict):
+        raise ValueError("data/ranking_buffer.json precisa ser um dict indexado por token.")
+    return buffer
+
+
 def load_state():
     state = load_json(STATE_FILE, {})
     if not isinstance(state, dict):
@@ -507,7 +540,7 @@ def maybe_send_ops_alert(summary, results, current_time, config=None):
     return result
 
 
-def normalize_watchlist_entry(key, entry):
+def normalize_watchlist_entry(key, entry, origin="watchlist"):
     if not isinstance(entry, dict):
         return None
 
@@ -524,6 +557,7 @@ def normalize_watchlist_entry(key, entry):
         "chain": chain,
         "token_address": token_address,
         "entry": entry,
+        "origin": origin,
     }
 
 
@@ -531,11 +565,11 @@ def should_rank(entry):
     return entry.get("status") in {STATUS_NOVO, STATUS_ATIVO}
 
 
-def select_rankable_tokens(watchlist):
+def select_rankable_tokens(watchlist, origin="watchlist"):
     selected = []
 
     for key, entry in watchlist.items():
-        normalized = normalize_watchlist_entry(key, entry)
+        normalized = normalize_watchlist_entry(key, entry, origin=origin)
         if not normalized:
             continue
         if not should_rank(normalized["entry"]):
@@ -1122,6 +1156,208 @@ def update_watchlist_market_fields(updates_by_key):
         atomic_save_json(WATCHLIST_FILE, watchlist)
 
 
+def ranking_score(entry):
+    return numeric_or_none(entry.get("market_score"))
+
+
+def competitive_rank_key(item):
+    watchlist_key, entry, origin = item
+    score = ranking_score(entry)
+    score_value = score if score is not None else -1
+    eligibility = entry.get("social_eligibility")
+    eligibility_rank = {
+        SOCIAL_ELIGIBILITY_ELIGIBLE: 3,
+        None: 2,
+        SOCIAL_ELIGIBILITY_PENDING: 1,
+        SOCIAL_ELIGIBILITY_BLOCKED_OLD_MARKET: 0,
+    }.get(eligibility, 2)
+    reference_time = entry_reference_time(entry) or datetime.min.replace(tzinfo=timezone.utc)
+    origin_rank = 1 if origin == "watchlist" else 0
+    return (score_value, eligibility_rank, reference_time, origin_rank, watchlist_key)
+
+
+def buffer_entry_age_minutes(entry, current_time):
+    for field in (
+        "ranking_first_seen_at_utc",
+        "created_at_utc",
+        "discovered_at_utc",
+        "last_seen_at_utc",
+    ):
+        parsed = parse_iso(entry.get(field))
+        if parsed:
+            return max(0, (current_time - parsed).total_seconds() / 60)
+    return 0
+
+
+def buffer_entry_expired(entry, buffer_config, current_time):
+    if ranking_score(entry) is not None:
+        return False
+
+    age_minutes = buffer_entry_age_minutes(entry, current_time)
+    attempts = int(entry.get("ranking_attempts") or 0)
+    grace_minutes = config_int(buffer_config, "pending_grace_minutes", 15)
+    max_attempts = config_int(buffer_config, "max_rank_attempts", 5)
+    return age_minutes >= grace_minutes and attempts >= max_attempts
+
+
+def update_buffer_attempt_metadata(entry, current_time):
+    entry["ranking_last_checked_at_utc"] = to_iso(current_time)
+    entry["ranking_attempts"] = int(entry.get("ranking_attempts") or 0) + 1
+    if ranking_score(entry) is None:
+        entry["ranking_status"] = "pending_dexscreener"
+    else:
+        entry["ranking_status"] = "ranked"
+
+
+def prepare_promoted_entry(entry, current_time):
+    promoted = entry.copy()
+    promoted["status"] = promoted.get("status") or STATUS_NOVO
+    promoted["social_status"] = promoted.get("social_status") or "pendente"
+    promoted["monitor_status"] = promoted.get("monitor_status") or "pendente"
+    promoted["promoted_to_watchlist_at_utc"] = to_iso(current_time)
+    promoted["ranking_status"] = "promoted"
+    promoted.setdefault("telegram_alert_sent", False)
+    return promoted
+
+
+def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
+    retention_cfg = retention_config(config)
+    buffer_cfg = ranking_buffer_config(config)
+    buffer_path = ranking_buffer_path(buffer_cfg)
+    max_entries = config_int(retention_cfg, "max_entries", 500)
+    removed_records = []
+    promoted = 0
+    rejected = 0
+    expired = 0
+
+    with watchlist_lock():
+        watchlist = load_watchlist()
+        buffer = load_json(buffer_path, {})
+        if not isinstance(buffer, dict):
+            buffer = {}
+
+        for watchlist_key, update in updates_by_key.items():
+            if watchlist_key in watchlist and isinstance(watchlist.get(watchlist_key), dict):
+                entry = watchlist[watchlist_key]
+                for field in DEPRECATED_WATCHLIST_FIELDS:
+                    entry.pop(field, None)
+                entry.update(update)
+            if watchlist_key in buffer and isinstance(buffer.get(watchlist_key), dict):
+                entry = buffer[watchlist_key]
+                for field in DEPRECATED_WATCHLIST_FIELDS:
+                    entry.pop(field, None)
+                entry.update(update)
+                update_buffer_attempt_metadata(entry, current_time)
+
+        for watchlist_key in list(buffer.keys()):
+            if watchlist_key in watchlist:
+                buffer.pop(watchlist_key, None)
+
+        kept_watchlist = {}
+        candidate_pool = []
+        protected_count = 0
+
+        for watchlist_key, entry in watchlist.items():
+            if not isinstance(entry, dict):
+                kept_watchlist[watchlist_key] = entry
+                continue
+
+            reason = retention_reason(entry, retention_cfg, current_time)
+            if reason:
+                removed_records.append(
+                    {
+                        "reason": reason,
+                        "watchlist_key": watchlist_key,
+                        "entry": entry,
+                    }
+                )
+                continue
+
+            if is_retention_protected(entry):
+                kept_watchlist[watchlist_key] = entry
+                protected_count += 1
+                continue
+
+            candidate_pool.append((watchlist_key, entry, "watchlist"))
+
+        for watchlist_key, entry in list(buffer.items()):
+            if not isinstance(entry, dict):
+                continue
+
+            if buffer_entry_expired(entry, buffer_cfg, current_time):
+                buffer.pop(watchlist_key, None)
+                expired += 1
+                removed_records.append(
+                    {
+                        "reason": "buffer_expired_pending_dexscreener",
+                        "watchlist_key": watchlist_key,
+                        "entry": entry,
+                    }
+                )
+                continue
+
+            if ranking_score(entry) is None:
+                continue
+
+            candidate_pool.append((watchlist_key, entry, "buffer"))
+
+        if max_entries > 0:
+            available_slots = max(0, max_entries - protected_count)
+            selected = sorted(candidate_pool, key=competitive_rank_key, reverse=True)[:available_slots]
+            selected_keys = {watchlist_key for watchlist_key, _, _ in selected}
+        else:
+            selected = candidate_pool
+            selected_keys = {watchlist_key for watchlist_key, _, _ in selected}
+
+        for watchlist_key, entry, origin in selected:
+            if origin == "watchlist":
+                kept_watchlist[watchlist_key] = entry
+                continue
+
+            kept_watchlist[watchlist_key] = prepare_promoted_entry(entry, current_time)
+            buffer.pop(watchlist_key, None)
+            promoted += 1
+
+        for watchlist_key, entry, origin in candidate_pool:
+            if watchlist_key in selected_keys:
+                continue
+            if origin == "watchlist":
+                removed_records.append(
+                    {
+                        "reason": "watchlist_replaced_by_higher_ranked_token",
+                        "watchlist_key": watchlist_key,
+                        "entry": entry,
+                    }
+                )
+                continue
+
+            buffer.pop(watchlist_key, None)
+            rejected += 1
+            removed_records.append(
+                {
+                    "reason": "rejected_below_watchlist_cutoff",
+                    "watchlist_key": watchlist_key,
+                    "entry": entry,
+                }
+            )
+
+        atomic_save_json(WATCHLIST_FILE, kept_watchlist)
+        atomic_save_json(buffer_path, buffer)
+
+    archive_removed_watchlist_entries(removed_records, retention_cfg, current_time)
+    return {
+        "enabled": True,
+        "removed": len([record for record in removed_records if not record["reason"].startswith("buffer_") and not record["reason"].startswith("rejected_")]),
+        "archived": len(removed_records),
+        "promoted_from_buffer": promoted,
+        "rejected_from_buffer": rejected,
+        "expired_from_buffer": expired,
+        "max_entries": max_entries,
+        "remaining": len(load_watchlist()),
+        "buffer_remaining": len(load_ranking_buffer(config)),
+    }
+
+
 def retention_config(config):
     configured = market_ranker_config(config).get("watchlist_retention") or {}
     defaults = DEFAULT_CONFIG["market_ranker"]["watchlist_retention"]
@@ -1289,7 +1525,7 @@ def apply_watchlist_retention(config, current_time):
                 kept.pop(watchlist_key, None)
                 removed_records.append(
                     {
-                        "reason": "retention_blind_cap",
+                        "reason": "retention_cap_low_rank",
                         "watchlist_key": watchlist_key,
                         "entry": entry,
                     }
@@ -1313,6 +1549,7 @@ def print_summary(summary, results):
     print(f"Ciclo: {summary['timestamp']}")
     print(f"Dry-run: {str(summary['dry_run']).lower()}")
     print(f"Tokens lidos da WL: {summary['watchlist_total']}")
+    print(f"Tokens no buffer de ranking: {summary.get('ranking_buffer_total', 0)}")
     print(f"Tokens consultados: {summary['tokens_checked']}")
     print(f"Chamadas Dexscreener em lote: {summary.get('dex_batch_calls', 0)}")
     print(f"Encontrados na Dexscreener: {summary['dex_found']}")
@@ -1323,6 +1560,10 @@ def print_summary(summary, results):
         print(
             "Retencao WL: "
             f"removidos={retention.get('removed', 0)} | "
+            f"promovidos_buffer={retention.get('promoted_from_buffer', 0)} | "
+            f"rejeitados_buffer={retention.get('rejected_from_buffer', 0)} | "
+            f"expirados_buffer={retention.get('expired_from_buffer', 0)} | "
+            f"buffer={retention.get('buffer_remaining', 0)} | "
             f"restantes={retention.get('remaining')} | "
             f"teto={retention.get('max_entries')}"
         )
@@ -1380,8 +1621,12 @@ def run_cycle(dry_run=False, session=requests):
     current_time = utc_now()
     now_text = to_iso(current_time)
     watchlist = load_watchlist()
+    ranking_buffer = load_ranking_buffer(config)
     state = load_state()
-    rankable_tokens = select_rankable_tokens(watchlist)
+    rankable_tokens = select_rankable_tokens(watchlist) + select_rankable_tokens(
+        ranking_buffer,
+        origin="buffer",
+    )
 
     results = []
     updates_by_key = {}
@@ -1409,6 +1654,11 @@ def run_cycle(dry_run=False, session=requests):
             "selected_pair_created_at_utc": None,
         }
         error_text = None
+        updates_by_key.setdefault(token["watchlist_key"], {}).update(
+            {
+                "ranking_last_checked_at_utc": now_text,
+            }
+        )
 
         try:
             if errors_by_key.get(token["watchlist_key"]):
@@ -1491,15 +1741,25 @@ def run_cycle(dry_run=False, session=requests):
     atomic_save_json(STATE_FILE, state)
 
     if not dry_run:
-        update_watchlist_market_fields(updates_by_key)
-        retention_summary = apply_watchlist_retention(config, current_time)
+        retention_summary = apply_ranker_updates_and_selection(
+            updates_by_key,
+            config,
+            current_time,
+        )
     else:
-        retention_summary = {"enabled": False, "removed": 0, "max_entries": None, "remaining": len(watchlist)}
+        retention_summary = {
+            "enabled": False,
+            "removed": 0,
+            "max_entries": None,
+            "remaining": len(watchlist),
+            "buffer_remaining": len(ranking_buffer),
+        }
 
     summary = {
         "timestamp": now_text,
         "dry_run": dry_run,
         "watchlist_total": len(watchlist),
+        "ranking_buffer_total": len(ranking_buffer),
         "tokens_checked": len(rankable_tokens),
         "dex_found": dex_found,
         "dex_not_found": dex_not_found,
