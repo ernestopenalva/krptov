@@ -103,6 +103,36 @@ class WatchlistRankingTests(unittest.TestCase):
         self.assertEqual(len(ranked), 1)
         self.assertEqual(ranked[0]["market_score"], 10)
 
+    def test_robinhood_chain_filter_and_compact_label(self):
+        token_address = "0xfe600867eefca94549627e6b755cba6198442ef2"
+        watchlist = {
+            f"robinhood:{token_address}": {
+                "chain": "robinhood",
+                "token_address": token_address,
+                "status": "novo",
+                "social_eligibility": "eligible",
+                "market_score": 75,
+                "quote_liquidity_usd": 1000,
+                "minimum_token_age_inferred_minutes": 45,
+            },
+            "base:0x2222222222222222222222222222222222222222": {
+                "chain": "base",
+                "token_address": "0x2222222222222222222222222222222222222222",
+                "status": "novo",
+                "social_eligibility": "eligible",
+                "market_score": 90,
+                "quote_liquidity_usd": 1000,
+                "minimum_token_age_inferred_minutes": 45,
+            },
+        }
+
+        ranked = watchlist_ranking.ranked_entries(watchlist, args(chain="robinhood"))
+        rows = watchlist_ranking.table_rows(ranked, {}, top=1)
+
+        self.assertEqual(len(ranked), 1)
+        self.assertEqual(ranked[0]["chain"], "robinhood")
+        self.assertEqual(rows[0]["chain"], "rh")
+
     def test_social_victor_prioritizes_active_and_shows_remaining_window(self):
         current = watchlist_ranking.datetime(
             2026, 6, 15, 12, 0, tzinfo=watchlist_ranking.BRASILIA_TZ

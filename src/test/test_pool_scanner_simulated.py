@@ -44,6 +44,10 @@ BSC_USDT = "0x55d398326f99059ff775485246999027b3197955"
 PANCAKESWAP_V2_FACTORY = "0xca143ce32fe78f1f7019d7d551a6402fc5350c73"
 PANCAKESWAP_V3_FACTORY = "0x0bfbcf9fa4f9c56b0f40a671ad40e0805a091865"
 BSC_UNISWAP_V3_FACTORY = "0xdb1d10011ad0ff90774d0c6bb92e5c5c8b4461f7"
+ROBINHOOD_WETH = "0x0bd7d308f8e1639fab988df18a8011f41eacad73"
+ROBINHOOD_USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+ROBINHOOD_UNISWAP_V3_FACTORY = "0x1f7d7550b1b028f7571e69a784071f0205fd2efa"
+ROBINHOOD_UNISWAP_V2_FACTORY = "0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f"
 
 
 def topic_address(address):
@@ -431,6 +435,86 @@ class PoolScannerSimulatedTests(unittest.TestCase):
         self.assertEqual(sources["pancakeswap_v3"]["topic"], pool_scanner.POOL_CREATED_TOPIC)
         self.assertEqual(sources["pancakeswap_v3"]["decoder"], pool_scanner.decode_uniswap_v3_pool_created)
         self.assertEqual(sources["uniswap_v3"]["topic"], pool_scanner.POOL_CREATED_TOPIC)
+
+    def test_robinhood_config_builds_uniswap_v2_v3_and_v4_sources(self):
+        previous_rpc_url = os.environ.get("TEST_ROBINHOOD_WSS_URL")
+        os.environ["TEST_ROBINHOOD_WSS_URL"] = "wss://robinhood.example.invalid"
+        try:
+            chains = pool_scanner.build_enabled_chains(
+                {
+                    "chains": {
+                        "robinhood": {
+                            "enabled": True,
+                            "rpc_env": "TEST_ROBINHOOD_WSS_URL",
+                            "quote_tokens": {
+                                "ETH": ETH,
+                                "WETH": ROBINHOOD_WETH,
+                                "USDG": ROBINHOOD_USDG,
+                            },
+                            "sources": [
+                                {
+                                    "name": "uniswap_v4",
+                                    "enabled": True,
+                                    "type": "uniswap_v4_pool_manager",
+                                    "pool_manager_address": POOL_MANAGER,
+                                    "event": "Initialize",
+                                },
+                                {
+                                    "name": "uniswap_v3",
+                                    "enabled": True,
+                                    "type": "uniswap_v3_factory",
+                                    "factory_address": ROBINHOOD_UNISWAP_V3_FACTORY,
+                                    "event": "PoolCreated",
+                                },
+                                {
+                                    "name": "uniswap_v2",
+                                    "enabled": True,
+                                    "type": "uniswap_v2_factory",
+                                    "factory_address": ROBINHOOD_UNISWAP_V2_FACTORY,
+                                    "event": "PairCreated",
+                                },
+                            ],
+                        }
+                    }
+                }
+            )
+        finally:
+            if previous_rpc_url is None:
+                os.environ.pop("TEST_ROBINHOOD_WSS_URL", None)
+            else:
+                os.environ["TEST_ROBINHOOD_WSS_URL"] = previous_rpc_url
+
+        sources = {source["name"]: source for source in chains[0]["sources"]}
+        self.assertEqual(chains[0]["name"], "robinhood")
+        self.assertEqual(chains[0]["quote_tokens"][ETH], "ETH")
+        self.assertEqual(chains[0]["quote_tokens"][ROBINHOOD_WETH], "WETH")
+        self.assertEqual(chains[0]["quote_tokens"][ROBINHOOD_USDG], "USDG")
+        self.assertEqual(sources["uniswap_v4"]["topic"], pool_scanner.INITIALIZE_TOPIC)
+        self.assertEqual(sources["uniswap_v3"]["topic"], pool_scanner.POOL_CREATED_TOPIC)
+        self.assertEqual(sources["uniswap_v2"]["topic"], pool_scanner.PAIR_CREATED_TOPIC)
+
+    def test_robinhood_v3_weth_event_identifies_candidate(self):
+        decoded = pool_scanner.decode_uniswap_v3_pool_created(
+            {
+                "topics": [
+                    pool_scanner.POOL_CREATED_TOPIC,
+                    topic_address(ROBINHOOD_WETH),
+                    topic_address(TOKEN_A),
+                    "0x" + uint_word(10000),
+                ],
+                "data": "0x" + int_word(200) + uint_word(int(POOL, 16)),
+            }
+        )
+        candidate, ignored_reason = pool_scanner.identify_new_token(
+            decoded,
+            {ROBINHOOD_WETH: "WETH"},
+        )
+
+        self.assertIsNone(ignored_reason)
+        self.assertEqual(decoded["pool_address"], POOL)
+        self.assertEqual(decoded["fee"], 10000)
+        self.assertEqual(candidate["token_address"], TOKEN_A)
+        self.assertEqual(candidate["quote_token"], "WETH")
 
 
 if __name__ == "__main__":

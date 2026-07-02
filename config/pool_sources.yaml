@@ -81,3 +81,26 @@ chains:
         type: uniswap_v3_factory
         factory_address: "0xdB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7"
         event: PoolCreated
+  robinhood:
+    enabled: true
+    rpc_env: ALCHEMY_ROBINHOOD_WSS_URL
+    quote_tokens:
+      ETH: "0x0000000000000000000000000000000000000000"
+      WETH: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+      USDG: "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+    sources:
+      - name: uniswap_v4
+        enabled: true
+        type: uniswap_v4_pool_manager
+        pool_manager_address: "0x000000000004444c5dc75cb358380d2e3de08a90"
+        event: Initialize
+      - name: uniswap_v3
+        enabled: true
+        type: uniswap_v3_factory
+        factory_address: "0x1f7d7550B1b028f7571E69A784071F0205FD2EfA"
+        event: PoolCreated
+      - name: uniswap_v2
+        enabled: true
+        type: uniswap_v2_factory
+        factory_address: "0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f"
+        event: PairCreated

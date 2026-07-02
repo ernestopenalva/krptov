@@ -406,7 +406,12 @@ def display_name(entry):
 
 
 def compact_chain(value):
-    return {"ethereum": "eth", "base": "base", "bsc": "bsc"}.get(value, str(value or "-"))
+    return {
+        "ethereum": "eth",
+        "base": "base",
+        "bsc": "bsc",
+        "robinhood": "rh",
+    }.get(value, str(value or "-"))
 
 
 def compact_source(value):
@@ -911,7 +916,7 @@ def parse_args():
     )
     parser.add_argument("--watchlist", type=Path, default=WATCHLIST_FILE)
     parser.add_argument("--top", type=int, default=25)
-    parser.add_argument("--chain", choices=["ethereum", "base", "bsc"])
+    parser.add_argument("--chain", choices=["ethereum", "base", "bsc", "robinhood"])
     parser.add_argument("--source")
     parser.add_argument("--eligible-only", action="store_true")
     parser.add_argument("--active-only", action="store_true")
