@@ -95,7 +95,9 @@ def fake_analysis(rank=80, signature="author_followers_high"):
         "posts_found": 1,
         "users_found": 1,
         "best_post_score": 0,
+        "best_post_author_followers": 25000,
         "best_author_followers": 25000,
+        "min_author_followers_for_alert": 1000,
         "author_badge_found": True,
         "affiliation_found": False,
         "bio_patterns_found": [],
@@ -681,7 +683,7 @@ class SocialInferenceTelegramTests(unittest.TestCase):
         self.assertEqual(analysis["trigger_posts"][0]["tweet_id"], "1")
         self.assertTrue(social_inference.should_generate_alert({}, analysis))
 
-    def test_any_post_alerts_without_followers_or_badges(self):
+    def test_post_from_small_author_does_not_alert(self):
         payload = {
             "data": [
                 {
@@ -711,6 +713,35 @@ class SocialInferenceTelegramTests(unittest.TestCase):
         self.assertEqual(analysis["origin_summary"]["author_username"], "small_author")
         self.assertEqual(analysis["origin_summary"]["author_followers"], 12)
         self.assertEqual(analysis["trigger_posts"][0]["author_username"], "small_author")
+        self.assertFalse(social_inference.should_generate_alert({}, analysis))
+
+    def test_post_from_author_with_1k_followers_alerts(self):
+        payload = {
+            "data": [
+                {
+                    "id": "qualified-post",
+                    "author_id": "u1",
+                    "text": "CA 0xabc",
+                    "created_at": "2026-06-10T12:00:00Z",
+                    "public_metrics": {},
+                }
+            ],
+            "includes": {
+                "users": [
+                    {
+                        "id": "u1",
+                        "username": "qualified_author",
+                        "public_metrics": {"followers_count": 1000},
+                    }
+                ]
+            },
+        }
+
+        analysis = social_inference.build_social_analysis(payload, social_inference.DEFAULT_CONFIG)
+
+        self.assertEqual(analysis["posts_found"], 1)
+        self.assertEqual(analysis["best_author_followers"], 1000)
+        self.assertIn("post_found", analysis["alert_reasons"])
         self.assertTrue(social_inference.should_generate_alert({}, analysis))
 
     def test_zero_posts_does_not_alert(self):
@@ -754,6 +785,7 @@ class SocialInferenceTelegramTests(unittest.TestCase):
         self.assertIn("post_found", analysis["alert_reasons"])
         self.assertEqual(analysis["origin_summary"]["author_affiliation_name"], "Sigma")
         self.assertEqual(analysis["origin_summary"]["author_affiliation_username"], "SigmaTrading")
+        self.assertTrue(social_inference.should_generate_alert({}, analysis))
 
 
 if __name__ == "__main__":

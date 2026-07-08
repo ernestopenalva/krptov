@@ -20,7 +20,7 @@ from src.modules import telegram_notifier
 
 X_SEARCH_RECENT_URL = "https://api.x.com/2/tweets/search/recent"
 X_USER_BY_USERNAME_URL = "https://api.x.com/2/users/by/username/{username}"
-SOCIAL_INFERENCE_VERSION = "krptov-social-inference-v1.1-social-victor-any-post-2026-06-22"
+SOCIAL_INFERENCE_VERSION = "krptov-social-inference-v1.1-social-victor-author-1k-2026-07-08"
 X_USER_FIELDS = "username,name,description,created_at,verified,verified_type,is_identity_verified,affiliation,public_metrics,protected,parody,url"
 
 STATUS_NOVO = "novo"
@@ -85,7 +85,7 @@ DEFAULT_CONFIG = {
     "prioritize_market_score": True,
     "require_social_eligibility": SOCIAL_ELIGIBILITY_ELIGIBLE,
     "require_numeric_market_score": True,
-    "followers_alert_threshold": 2000,
+    "followers_alert_threshold": 1000,
     "excluded_author_usernames": [
         "dexsignals",
     ],
@@ -1241,11 +1241,13 @@ def complete_trigger_posts(trigger_posts, tweets, users_by_id, limit=3):
 def build_social_analysis(response_payload, config, bearer_token=None):
     tweets = response_payload.get("data") or []
     users = response_payload.get("includes", {}).get("users", [])
+    min_author_followers_for_alert = int(config.get("followers_alert_threshold") or 0)
 
     users_by_id = {user.get("id"): user for user in users}
     alert_reasons = []
     alert_rank = 0
     best_post_score = 0
+    best_post_author_followers = 0
     best_author_followers = 0
     origin_summary = empty_origin_summary()
     best_followers_author_summary = None
@@ -1255,6 +1257,11 @@ def build_social_analysis(response_payload, config, bearer_token=None):
 
     for tweet in tweets:
         tweet["krptov_engagement_rate"] = calculate_engagement_rate(tweet)
+        author = users_by_id.get(tweet.get("author_id")) or {}
+        best_post_author_followers = max(
+            best_post_author_followers,
+            get_followers_count(author),
+        )
 
     for user in users:
         automated_author = is_automated_author(user, config)
@@ -1354,7 +1361,9 @@ def build_social_analysis(response_payload, config, bearer_token=None):
         "posts_found": len(tweets),
         "users_found": len(users),
         "best_post_score": best_post_score,
+        "best_post_author_followers": best_post_author_followers,
         "best_author_followers": best_author_followers,
+        "min_author_followers_for_alert": min_author_followers_for_alert,
         "author_badge_found": origin_summary["author_verified_type"] in ["business", "government"],
         "affiliation_found": origin_summary["author_affiliation_found"],
         "bio_patterns_found": [],
@@ -1758,7 +1767,23 @@ def register_social_check_usage(
 
 
 def should_generate_alert(entry, analysis):
-    return int(analysis.get("posts_found") or 0) > 0
+    if int(analysis.get("posts_found") or 0) <= 0:
+        return False
+
+    alert_reasons = set(analysis.get("alert_reasons") or [])
+    if {
+        "author_affiliation_found",
+        "author_verified_type_business",
+        "author_verified_type_government",
+    } & alert_reasons:
+        return True
+
+    min_followers = int(
+        analysis.get("min_author_followers_for_alert")
+        or DEFAULT_CONFIG["followers_alert_threshold"]
+    )
+    best_post_author_followers = int(analysis.get("best_post_author_followers") or 0)
+    return best_post_author_followers >= min_followers
 
 
 def apply_alert(entry, analysis, current_time):
@@ -1908,7 +1933,9 @@ def empty_analysis():
         "posts_found": 0,
         "users_found": 0,
         "best_post_score": 0,
+        "best_post_author_followers": 0,
         "best_author_followers": 0,
+        "min_author_followers_for_alert": int(DEFAULT_CONFIG["followers_alert_threshold"]),
         "author_badge_found": False,
         "affiliation_found": False,
         "bio_patterns_found": [],

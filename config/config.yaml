@@ -51,7 +51,7 @@ social_inference:
     - signals
     - bot
 
-  followers_alert_threshold: 2000
+  followers_alert_threshold: 1000
 
   badges:
     alert_on_affiliation: true
