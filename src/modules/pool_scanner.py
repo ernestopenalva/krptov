@@ -494,6 +494,10 @@ def build_watchlist_entry(chain, source, decoded_event, candidate, received_at_u
     if source["type"] == "uniswap_v4_pool_manager":
         entry["pool_id"] = decoded_event["pool_id"]
         entry["pool_manager_address"] = source["pool_manager_address"]
+    if "stable" in decoded_event:
+        # Needed by the on-chain Aerodrome provider: stable and volatile pools
+        # use different invariants even though both expose getReserves().
+        entry["stable_pool"] = bool(decoded_event["stable"])
     return entry
 
 

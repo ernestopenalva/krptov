@@ -10,6 +10,7 @@ from pathlib import Path
 import requests
 
 from src.modules import telegram_notifier
+from src.modules.monitor_watchlist import sync_ranked_watchlist
 
 
 MARKET_RANKER_VERSION = "krptov-market-ranker-v1-2026-06-03"
@@ -1345,6 +1346,25 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
         atomic_save_json(WATCHLIST_FILE, kept_watchlist)
         atomic_save_json(buffer_path, buffer)
 
+    # The Monitor WL deliberately receives the same ranked market population,
+    # but none of the social-inference runtime state.  It has its own lock and
+    # ownership rules, so do this only after releasing the primary WL lock.
+    monitor_ranked_entries = sorted(
+        (
+            (watchlist_key, entry)
+            for watchlist_key, entry in kept_watchlist.items()
+            if isinstance(entry, dict) and ranking_score(entry) is not None
+        ),
+        key=lambda item: competitive_rank_key((item[0], item[1], "watchlist")),
+        reverse=True,
+    )
+    if WATCHLIST_FILE == PROJECT_ROOT / "data" / "watchlist.json":
+        monitor_sync = sync_ranked_watchlist(monitor_ranked_entries)
+    else:
+        # Unit/simulation runs redirect the primary WL to a temporary file and
+        # must not mutate the operator's real Monitor WL.
+        monitor_sync = {"ranked": 0, "preserved_runtime": 0}
+
     archive_removed_watchlist_entries(removed_records, retention_cfg, current_time)
     return {
         "enabled": True,
@@ -1356,6 +1376,8 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
         "max_entries": max_entries,
         "remaining": len(load_watchlist()),
         "buffer_remaining": len(load_ranking_buffer(config)),
+        "monitor_watchlist_ranked": monitor_sync["ranked"],
+        "monitor_watchlist_runtime_preserved": monitor_sync["preserved_runtime"],
     }
 
 

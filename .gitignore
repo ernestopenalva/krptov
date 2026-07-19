@@ -17,6 +17,9 @@ data/social_inference_usage_*.json
 data/pool_scanner/
 data/pool_diagnostics/
 data/market_api_compare/
+data/monitor/
+data/position/
+data/trading_runtime/
 !data/.gitkeep
 
 # sistema/editor

@@ -115,3 +115,88 @@ market_ranker:
     file: "data/ranking_buffer.json"
     pending_grace_minutes: 15
     max_rank_attempts: 5
+
+monitor:
+  enabled: true
+  watchlist_file: "data/monitor_watchlist.json"
+  poll_interval_seconds: 5
+  max_monitoring_minutes: 15
+  max_attempts: 3
+  cooldown_minutes: 15
+
+  scheduler:
+    max_active_monitors: 5
+    max_social_alert_monitors: 2
+    loop_interval_seconds: 1
+
+  decision_window_minutes: 5
+  momentum_entry:
+    enabled: true
+    min_ticks_before_decision: 3
+    min_momentum_pct: 4.0
+    max_runup_pct: 12.0
+    max_pullback_from_peak_pct: 3.0
+    min_liquidity_growth_pct: 0.0
+    max_liquidity_drop_pct: 5.0
+    health_min_score: 0.60
+    min_buy_pressure: 0.52
+    block_if_price_falling: true
+    price_falling_window_ticks: 3
+
+  entry:
+    min_ticks_before_decision: 12
+    min_pullback_pct: 2.0
+    max_pullback_pct: 8.0
+    max_drawdown_discard_pct: 10.0
+    min_buy_pressure: 0.52
+    min_volume_keep_ratio: 0.40
+    breakout_margin_pct: 0.2
+    health_min_score: 0.60
+    health_min_volume_ratio: 0.35
+    health_min_buy_pressure: 0.48
+    health_max_liquidity_drop_pct: 35
+    health_recent_ticks: 6
+    pullback_recent_ticks: 24
+
+position:
+  enabled: true
+  mode: "paper"
+  poll_interval_seconds: 1
+  timeout_seconds: 15
+  entry_tick_wait_seconds: 30
+  max_entry_divergence_pct: 10
+  stop_loss_pct: 5
+  breakeven_trigger_pct: 5
+  trailing_gap_pct: 4
+  stop_persist_seconds: 3
+  trailing_persist_seconds: 3
+  profit_lock_enabled: true
+  profit_lock_steps:
+    - trigger_pct: 5
+      lock_pct: 1
+    - trigger_pct: 6
+      lock_pct: 3
+    - trigger_pct: 10
+      lock_pct: 5
+  adaptive_breathing_band:
+    enabled: true
+    candle_seconds: 3
+    lookback_candles: 5
+    band_fraction: 0.5
+    band_min_pct: 2.0
+    band_max_pct: 8.0
+
+market_data:
+  rpc_urls:
+    ethereum: "ALCHEMY_ETH_HTTPS_URL"
+    base: "ALCHEMY_BASE_HTTPS_URL"
+    bsc: "ALCHEMY_BNB_HTTPS_URL"
+    robinhood: "ALCHEMY_ROBINHOOD_HTTPS_URL"
+    solana: "ALCHEMY_SOLANA_RPC_URL"
+  uniswap_v4_state_view_addresses:
+    ethereum: "UNISWAP_V4_STATE_VIEW_ETHEREUM"
+    base: "UNISWAP_V4_STATE_VIEW_BASE"
+    bsc: "UNISWAP_V4_STATE_VIEW_BSC"
+    robinhood: "UNISWAP_V4_STATE_VIEW_ROBINHOOD"
+  quote_usd_cache_seconds: 60
+  quote_usd_max_staleness_seconds: 120

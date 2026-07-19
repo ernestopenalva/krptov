@@ -16,6 +16,7 @@ except ImportError:
     ZoneInfo = None
 
 from src.modules import telegram_notifier
+from src.modules.monitor_watchlist import admit_social_alert
 
 
 X_SEARCH_RECENT_URL = "https://api.x.com/2/tweets/search/recent"
@@ -2282,6 +2283,34 @@ def run_cycle(config_file=CONFIG_FILE):
                     status_before,
                     watchlist_key=watchlist_key,
                     raw_alert_posts_file=raw_alert_posts_file,
+                )
+                social_monitor_snapshot = {
+                    "schema_version": "krptov-social-monitor-admission-v1",
+                    "alert_at_utc": alert.get("timestamp"),
+                    "posts_found": alert.get("posts_found"),
+                    "users_found": alert.get("users_found"),
+                    "alert_rank": alert.get("alert_rank"),
+                    "alert_reasons": alert.get("alert_reasons") or [],
+                    "best_post_score": alert.get("best_post_score"),
+                    "best_author_followers": alert.get("best_author_followers"),
+                    "author_badge_found": alert.get("author_badge_found"),
+                    "affiliation_found": alert.get("affiliation_found"),
+                    "selected_origin_summary": alert.get("selected_origin_summary"),
+                    "best_followers_author_summary": alert.get("best_followers_author_summary"),
+                    "best_affiliation_author_summary": alert.get("best_affiliation_author_summary"),
+                }
+                admitted_to_monitor = False
+                if WATCHLIST_FILE == PROJECT_ROOT / "data" / "watchlist.json":
+                    admitted_to_monitor = admit_social_alert(
+                        watchlist_key,
+                        entry,
+                        social_monitor_snapshot,
+                        admitted_at_utc=alert.get("timestamp"),
+                    )
+                alert["monitor_admission_requested"] = True
+                alert["monitor_admitted"] = admitted_to_monitor
+                alert["monitor_admission_reason"] = (
+                    "social_fifo" if admitted_to_monitor else "already_in_monitor_circuit"
                 )
                 if telegram_config.get("enabled", True):
                     if should_send_telegram_alert(entry, analysis):
