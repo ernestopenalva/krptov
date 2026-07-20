@@ -14,6 +14,8 @@ def args(**updates):
         "eligible_only": False,
         "active_only": False,
         "top": 30,
+        "circuit": "inference",
+        "watchlist": None,
     }
     defaults.update(updates)
     return argparse.Namespace(**defaults)
@@ -230,15 +232,80 @@ class WatchlistRankingTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            entries = watchlist_ranking.load_archived_social_entries(path=archive)
             total, today = watchlist_ranking.social_completion_summary(
-                entries,
+                watchlist_ranking.load_archived_social_entries(path=archive),
                 current_date=watchlist_ranking.datetime(2026, 6, 15).date(),
             )
 
         self.assertEqual(total["alert_sent"], 1)
         self.assertEqual(today["alert_sent"], 1)
         self.assertEqual(total["low_quote_liquidity"], 1)
+
+    def test_jsonl_loader_is_incremental(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "events.jsonl"
+            path.write_text(
+                "\n".join(json.dumps({"index": index}) for index in range(3)),
+                encoding="utf-8",
+            )
+
+            records = watchlist_ranking.load_jsonl_file(path)
+
+            self.assertFalse(isinstance(records, list))
+            self.assertEqual(next(records), {"index": 0})
+            self.assertEqual(list(records), [{"index": 1}, {"index": 2}])
+
+    def test_monitor_circuit_uses_runtime_order_and_columns(self):
+        watchlist = {
+            "solana:technical": {
+                "chain": "solana",
+                "token_address": "technical",
+                "token_symbol": "TECH",
+                "quote_token": "SOL",
+                "source": "pumpswap",
+                "market_score": 95,
+                "technical_rank": 1,
+                "monitor_status": "eligible",
+                "monitor_attempts": 0,
+            },
+            "solana:social": {
+                "chain": "solana",
+                "token_address": "social",
+                "token_symbol": "SOC",
+                "quote_token": "SOL",
+                "source": "pumpswap",
+                "market_score": 80,
+                "technical_rank": 8,
+                "rank_bypass": True,
+                "admission_source": "social_alert",
+                "social_enqueued_at_utc": "2026-07-19T10:00:00+00:00",
+                "monitor_status": "eligible",
+                "monitor_attempts": 1,
+            },
+        }
+
+        ranked = watchlist_ranking.ranked_entries(watchlist, args(circuit="monitor"))
+        rows = watchlist_ranking.table_rows(ranked, {}, top=2, circuit="monitor")
+
+        self.assertEqual(ranked[0]["token_symbol"], "SOC")
+        self.assertEqual(rows[0]["origin"], "social")
+        self.assertEqual(rows[0]["attempts"], "1")
+        self.assertEqual(rows[1]["rank"], "1")
+        self.assertIn(
+            ("monitor_status", "Monitor", 6),
+            watchlist_ranking.table_columns(width=160, circuit="monitor"),
+        )
+
+    def test_circuit_selects_default_watchlist_and_custom_path_overrides_it(self):
+        monitor_args = args(circuit="monitor")
+        self.assertEqual(
+            watchlist_ranking.selected_watchlist_path(monitor_args),
+            watchlist_ranking.MONITOR_WATCHLIST_FILE,
+        )
+
+        custom = Path("custom.json")
+        monitor_args.watchlist = custom
+        self.assertEqual(watchlist_ranking.selected_watchlist_path(monitor_args), custom)
 
     def test_social_alert_summary_counts_aggregate_and_today_jsonl(self):
         with tempfile.TemporaryDirectory() as temp_dir:

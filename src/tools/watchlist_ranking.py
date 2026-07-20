@@ -5,12 +5,14 @@ import shutil
 import time
 from collections import Counter
 from datetime import datetime, time as datetime_time, timedelta
+from itertools import chain
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WATCHLIST_FILE = PROJECT_ROOT / "data" / "watchlist.json"
+MONITOR_WATCHLIST_FILE = PROJECT_ROOT / "data" / "monitor_watchlist.json"
 CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
 SOCIAL_LATEST_FILE = PROJECT_ROOT / "data" / "social_inference_latest.json"
 SOCIAL_ALERTS_FILE = PROJECT_ROOT / "data" / "social_alerts.json"
@@ -68,9 +70,8 @@ def load_json_file(path, default=None):
 
 def load_jsonl_file(path):
     if not path.exists():
-        return []
+        return
 
-    records = []
     try:
         with path.open("r", encoding="utf-8") as file:
             for line in file:
@@ -82,11 +83,9 @@ def load_jsonl_file(path):
                 except json.JSONDecodeError:
                     continue
                 if isinstance(record, dict):
-                    records.append(record)
+                    yield record
     except OSError:
-        return []
-
-    return records
+        return
 
 
 def load_social_settings(
@@ -411,6 +410,7 @@ def compact_chain(value):
         "base": "base",
         "bsc": "bsc",
         "robinhood": "rh",
+        "solana": "sol",
     }.get(value, str(value or "-"))
 
 
@@ -422,6 +422,7 @@ def compact_source(value):
         "sushiswap_v2": "sushi",
         "aerodrome": "aero",
         "aerodrome_slipstream": "aero_s",
+        "pumpswap": "pump",
     }
     return mapping.get(value, str(value or "-"))
 
@@ -498,6 +499,15 @@ def normalize_entry(key, entry):
         "token_address": entry.get("token_address") or key.split(":", 1)[-1],
         "token_name": entry.get("token_name"),
         "token_symbol": entry.get("token_symbol"),
+        "technical_rank": numeric_or_none(entry.get("technical_rank")),
+        "admission_source": entry.get("admission_source") or "technical_rank",
+        "rank_bypass": entry.get("rank_bypass") is True,
+        "monitor_status": entry.get("monitor_status") or "eligible",
+        "monitor_attempts": int(entry.get("monitor_attempts") or 0),
+        "monitor_started_at_utc": entry.get("monitor_started_at_utc"),
+        "monitor_cooldown_until_utc": entry.get("monitor_cooldown_until_utc"),
+        "social_ready_at_utc": entry.get("social_ready_at_utc"),
+        "social_enqueued_at_utc": entry.get("social_enqueued_at_utc"),
     }
 
 
@@ -535,20 +545,29 @@ def social_ready(entry, min_social_age_minutes=0, min_quote_liquidity_usd=1):
 
 def filter_entries(entries, args, min_social_age_minutes=0, min_quote_liquidity_usd=1):
     filtered = []
+    circuit = getattr(args, "circuit", "inference")
 
     for entry in entries:
         if args.chain and entry["chain"] != args.chain:
             continue
         if args.source and entry["source"] != args.source:
             continue
-        if args.active_only and entry["status"] != "ativo" and entry["social_status"] != "ativo":
-            continue
-        if args.eligible_only and not social_ready(
-            entry,
-            min_social_age_minutes=min_social_age_minutes,
-            min_quote_liquidity_usd=min_quote_liquidity_usd,
-        ):
-            continue
+        if args.active_only:
+            if circuit == "monitor":
+                if entry["monitor_status"] not in {"reserved", "monitoring", "position_open"}:
+                    continue
+            elif entry["status"] != "ativo" and entry["social_status"] != "ativo":
+                continue
+        if args.eligible_only:
+            if circuit == "monitor":
+                if entry["monitor_status"] != "eligible":
+                    continue
+            elif not social_ready(
+                entry,
+                min_social_age_minutes=min_social_age_minutes,
+                min_quote_liquidity_usd=min_quote_liquidity_usd,
+            ):
+                continue
         filtered.append(entry)
 
     return filtered
@@ -567,6 +586,23 @@ def ranking_sort_key(entry, min_social_age_minutes=0, min_quote_liquidity_usd=1)
     return (social_victor_rank, score_value, entry["last_seen_at_utc"])
 
 
+def monitor_sort_key(entry):
+    status = entry["monitor_status"]
+    if status in {"reserved", "monitoring", "position_open"}:
+        return (0, entry.get("monitor_started_at_utc") or "", 0)
+    if status == "eligible" and entry["rank_bypass"]:
+        return (
+            1,
+            entry.get("social_ready_at_utc") or entry.get("social_enqueued_at_utc") or "",
+            0,
+        )
+    if status == "eligible":
+        return (2, "", entry["technical_rank"] if entry["technical_rank"] is not None else 10**9)
+    if status == "cooldown":
+        return (3, entry.get("monitor_cooldown_until_utc") or "", 0)
+    return (4, status, entry["technical_rank"] if entry["technical_rank"] is not None else 10**9)
+
+
 def ranked_entries(watchlist, args):
     entries = [
         normalize_entry(key, entry)
@@ -580,14 +616,17 @@ def ranked_entries(watchlist, args):
         min_social_age_minutes=min_social_age_minutes,
         min_quote_liquidity_usd=min_quote_liquidity_usd,
     )
-    entries.sort(
-        key=lambda entry: ranking_sort_key(
-            entry,
-            min_social_age_minutes=min_social_age_minutes,
-            min_quote_liquidity_usd=min_quote_liquidity_usd,
-        ),
-        reverse=True,
-    )
+    if getattr(args, "circuit", "inference") == "monitor":
+        entries.sort(key=monitor_sort_key)
+    else:
+        entries.sort(
+            key=lambda entry: ranking_sort_key(
+                entry,
+                min_social_age_minutes=min_social_age_minutes,
+                min_quote_liquidity_usd=min_quote_liquidity_usd,
+            ),
+            reverse=True,
+        )
     return entries
 
 
@@ -622,10 +661,63 @@ def format_monitoring_window(entry, current_time=None):
     return f"{minutes}m"
 
 
-def table_rows(entries, previous_positions, top, max_social_checks=0, current_time=None):
+def compact_monitor_status(value):
+    return {
+        "eligible": "ready",
+        "reserved": "reserv",
+        "monitoring": "monit",
+        "cooldown": "cool",
+        "position_open": "posit",
+        "completed": "done",
+        "stopped": "stop",
+    }.get(value, str(value or "-")[:6])
+
+
+def compact_admission_source(entry):
+    if entry.get("rank_bypass") is True or entry.get("admission_source") == "social_alert":
+        return "social"
+    return "tech"
+
+
+def format_monitor_wait(entry, current_time=None):
+    status = entry["monitor_status"]
+    if status == "eligible":
+        return "fila"
+    if status != "cooldown":
+        return "-"
+    ready_at = parse_iso_datetime(entry.get("monitor_cooldown_until_utc"))
+    if not ready_at:
+        return "?"
+    seconds = max(0, int((ready_at - (current_time or brt_now())).total_seconds()))
+    if seconds <= 0:
+        return "ready"
+    minutes = (seconds + 59) // 60
+    return f"{minutes / 60:.1f}h" if minutes >= 60 else f"{minutes}m"
+
+
+def table_rows(entries, previous_positions, top, max_social_checks=0, current_time=None, circuit="inference"):
     rows = []
 
     for index, entry in enumerate(entries[:top], start=1):
+        if circuit == "monitor":
+            rows.append(
+                {
+                    "pos": str(index),
+                    "rank": str(int(entry["technical_rank"])) if entry["technical_rank"] is not None else "-",
+                    "chain": compact_chain(entry["chain"]),
+                    "source": compact_source(entry["source"]),
+                    "origin": compact_admission_source(entry),
+                    "monitor_status": compact_monitor_status(entry["monitor_status"]),
+                    "attempts": str(entry["monitor_attempts"]),
+                    "wait": format_monitor_wait(entry, current_time=current_time),
+                    "score": format_score(entry["market_score"]),
+                    "liq": format_money(entry["liquidity_usd"]),
+                    "quote_liq": format_money(entry["quote_liquidity_usd"]),
+                    "ca": entry["token_address"],
+                    "name": display_name(entry),
+                }
+            )
+            continue
         rows.append(
             {
                 "pos": str(index),
@@ -654,8 +746,38 @@ def terminal_width():
     return shutil.get_terminal_size((120, 20)).columns
 
 
-def table_columns(width=None):
+def table_columns(width=None, circuit="inference"):
     width = width or terminal_width()
+    if circuit == "monitor":
+        if width >= 145:
+            return [
+                ("pos", "#", 3),
+                ("rank", "Rank", 5),
+                ("chain", "Chn", 3),
+                ("source", "Src", 6),
+                ("origin", "Orig", 6),
+                ("monitor_status", "Monitor", 6),
+                ("attempts", "Tent", 4),
+                ("wait", "Espera", 6),
+                ("score", "Score", 6),
+                ("liq", "LiqDS", 8),
+                ("quote_liq", "QLiq", 8),
+                ("ca", "CA", 44),
+                ("name", "Nome", 18),
+            ]
+        return [
+            ("pos", "#", 3),
+            ("rank", "Rank", 4),
+            ("chain", "Chn", 3),
+            ("origin", "Orig", 5),
+            ("monitor_status", "Mon", 6),
+            ("attempts", "Tent", 4),
+            ("wait", "Esp", 5),
+            ("score", "Score", 5),
+            ("liq", "Liq", 7),
+            ("quote_liq", "QLiq", 7),
+            ("name", "Nome", 16),
+        ]
     if width >= 145:
         return [
             ("pos", "#", 3),
@@ -695,8 +817,8 @@ def table_columns(width=None):
     ]
 
 
-def print_table(rows, width=None):
-    columns = table_columns(width)
+def print_table(rows, width=None, circuit="inference"):
+    columns = table_columns(width, circuit=circuit)
     header = " ".join(title.ljust(width) for _, title, width in columns)
     print(header)
     print("-" * len(header))
@@ -706,17 +828,18 @@ def print_table(rows, width=None):
 
 
 def social_completion_summary(entries, current_date):
-    total = Counter(entry["social_completed_reason"] for entry in entries)
+    total = Counter()
     today = Counter()
     for entry in entries:
+        reason = entry["social_completed_reason"]
+        total[reason] += 1
         completed_at = parse_iso_datetime(entry.get("social_monitoring_completed_at"))
         if completed_at and completed_at.date() == current_date:
-            today[entry["social_completed_reason"]] += 1
+            today[reason] += 1
     return total, today
 
 
 def load_archived_social_entries(path=WATCHLIST_ARCHIVE_FILE):
-    entries = []
     for record in load_jsonl_file(path):
         entry = record.get("entry")
         if not isinstance(entry, dict):
@@ -733,17 +856,14 @@ def load_archived_social_entries(path=WATCHLIST_ARCHIVE_FILE):
         if not completed_reason:
             continue
 
-        entries.append(
-            {
-                "social_completed_reason": completed_reason,
-                "social_monitoring_completed_at": (
-                    entry.get("social_monitoring_completed_at")
-                    or entry.get("telegram_alert_sent_at")
-                    or record.get("archived_at_utc")
-                ),
-            }
-        )
-    return entries
+        yield {
+            "social_completed_reason": completed_reason,
+            "social_monitoring_completed_at": (
+                entry.get("social_monitoring_completed_at")
+                or entry.get("telegram_alert_sent_at")
+                or record.get("archived_at_utc")
+            ),
+        }
 
 
 def load_alert_records(current_date=None):
@@ -810,6 +930,10 @@ def format_social_completion_summary(total, today):
 
 
 def print_summary(watchlist, entries, args, previous_positions):
+    if getattr(args, "circuit", "inference") == "monitor":
+        print_monitor_summary(watchlist, entries, args, previous_positions)
+        return
+
     (
         max_social_checks,
         min_social_age_minutes,
@@ -841,9 +965,8 @@ def print_summary(watchlist, entries, args, previous_positions):
         new_limit=max_new_tokens,
         active_limit=max_active_tokens,
     )
-    archived_social_done = load_archived_social_entries()
     completion_total, completion_today = social_completion_summary(
-        social_done + archived_social_done,
+        chain(social_done, load_archived_social_entries()),
         current_brt.date(),
     )
     alert_summary = social_alert_summary(current_brt.date())
@@ -892,15 +1015,59 @@ def print_summary(watchlist, entries, args, previous_positions):
     if args.active_only:
         print("Filtro: apenas ativos")
     print()
-    print_table(table_rows(entries, previous_positions, args.top, max_social_checks=max_social_checks))
+    print_table(
+        table_rows(entries, previous_positions, args.top, max_social_checks=max_social_checks),
+        circuit="inference",
+    )
+
+
+def print_monitor_summary(watchlist, entries, args, previous_positions):
+    all_entries = [normalize_entry(key, entry) for key, entry in watchlist.items()]
+    all_entries = [entry for entry in all_entries if entry]
+    status_counts = Counter(entry["monitor_status"] for entry in all_entries)
+    origin_counts = Counter(compact_admission_source(entry) for entry in all_entries)
+    chain_counts = Counter(entry["chain"] for entry in all_entries)
+    active_monitors = status_counts["reserved"] + status_counts["monitoring"]
+
+    print("=== KRPTO-V | Watchlist Técnica do Monitor ===")
+    print(f"Atualizado: {brt_now().isoformat(timespec='seconds')}")
+    print(f"WL total: {len(all_entries)} | Visíveis no filtro: {len(entries)}")
+    print(
+        f"Monitores ativos: {active_monitors} | Positions abertas: {status_counts['position_open']} | "
+        f"Fila: {status_counts['eligible']} | Cooldown: {status_counts['cooldown']}"
+    )
+    print(f"Por chain: {dict(chain_counts)}")
+    print(f"Origem: {dict(origin_counts)}")
+    print(f"Status Monitor: {dict(status_counts)}")
+    if args.chain:
+        print(f"Filtro chain: {args.chain}")
+    if args.source:
+        print(f"Filtro source: {args.source}")
+    if args.eligible_only:
+        print("Filtro: apenas candidatos elegíveis para Monitor")
+    if args.active_only:
+        print("Filtro: apenas estados ativos do runtime")
+    print()
+    print_table(
+        table_rows(entries, previous_positions, args.top, circuit="monitor"),
+        circuit="monitor",
+    )
 
 
 def clear_screen():
     os.system("cls" if os.name == "nt" else "clear")
 
 
+def selected_watchlist_path(args):
+    if args.watchlist is not None:
+        return args.watchlist
+    if getattr(args, "circuit", "inference") == "monitor":
+        return MONITOR_WATCHLIST_FILE
+    return WATCHLIST_FILE
+
+
 def run_once(args, previous_positions=None):
-    watchlist = load_watchlist(args.watchlist)
+    watchlist = load_watchlist(selected_watchlist_path(args))
     entries = ranked_entries(watchlist, args)
     previous_positions = previous_positions or {}
     print_summary(watchlist, entries, args, previous_positions)
@@ -912,11 +1079,22 @@ def run_once(args, previous_positions=None):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Mostra o ranking atual da Watchlist do KRPTO-V.",
+        description="Mostra a Watchlist de Inferência ou a Watchlist técnica do Monitor.",
     )
-    parser.add_argument("--watchlist", type=Path, default=WATCHLIST_FILE)
+    parser.add_argument(
+        "--circuit",
+        choices=["inference", "monitor"],
+        default="inference",
+        help="Seleciona a WL; padrão: inference.",
+    )
+    parser.add_argument(
+        "--watchlist",
+        type=Path,
+        default=None,
+        help="Sobrescreve o arquivo padrão do circuito selecionado.",
+    )
     parser.add_argument("--top", type=int, default=25)
-    parser.add_argument("--chain", choices=["ethereum", "base", "bsc", "robinhood"])
+    parser.add_argument("--chain", choices=["ethereum", "base", "bsc", "robinhood", "solana"])
     parser.add_argument("--source")
     parser.add_argument("--eligible-only", action="store_true")
     parser.add_argument("--active-only", action="store_true")
