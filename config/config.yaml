@@ -116,6 +116,46 @@ market_ranker:
     pending_grace_minutes: 15
     max_rank_attempts: 5
 
+# Cada chain pode alimentar os dois circuitos de forma independente.
+chain_routing:
+  ethereum:
+    inference: true
+    monitor: false
+    social_alert_to_monitor: false
+  base:
+    inference: true
+    monitor: false
+    social_alert_to_monitor: false
+  bsc:
+    inference: true
+    monitor: false
+    social_alert_to_monitor: false
+  robinhood:
+    inference: true
+    monitor: false
+    social_alert_to_monitor: false
+  solana:
+    inference: true
+    monitor: true
+    social_alert_to_monitor: true
+
+# A decisao de existir um alerta continua pertencendo integralmente a
+# social_inference. Esta matriz apenas decide o destino do alerta ja aprovado.
+social_signal_routing:
+  ethereum: &evm_social_actions
+    business_badge: {telegram: true, monitor: false}
+    government_badge: {telegram: true, monitor: false}
+    authors: {telegram: true, monitor: false}
+    affiliation: {telegram: true, monitor: false}
+  base: *evm_social_actions
+  bsc: *evm_social_actions
+  robinhood: *evm_social_actions
+  solana:
+    business_badge: {telegram: true, monitor: true}
+    government_badge: {telegram: true, monitor: true}
+    authors: {telegram: false, monitor: true}
+    affiliation: {telegram: true, monitor: true}
+
 monitor:
   enabled: true
   watchlist_file: "data/monitor_watchlist.json"

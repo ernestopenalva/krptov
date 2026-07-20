@@ -10,7 +10,14 @@ from pathlib import Path
 import requests
 
 from src.modules import telegram_notifier
-from src.modules.monitor_watchlist import sync_ranked_watchlist
+from src.modules.chain_identity import (
+    make_watchlist_key as canonical_watchlist_key,
+    normalize_evm_address,
+    normalize_token_address,
+    split_watchlist_key as split_canonical_watchlist_key,
+)
+from src.modules.chain_routing import circuit_enabled, load_routing_sections
+from src.modules.monitor_watchlist import load_monitor_watchlist, sync_ranked_watchlist
 
 
 MARKET_RANKER_VERSION = "krptov-market-ranker-v1-2026-06-03"
@@ -225,6 +232,7 @@ def load_config(config_file=CONFIG_FILE):
         config.get("ops_alerts", {}),
         loaded_sections.get("ops_alerts", {}),
     )
+    config.update(load_routing_sections(Path(config_file)))
     return config
 
 
@@ -262,31 +270,12 @@ def market_sanity_config(config):
     return merge_dict(defaults, configured)
 
 
-def normalize_evm_address(address):
-    if not isinstance(address, str):
-        return None
-
-    address = address.strip()
-    if len(address) != 42 or not address.startswith("0x"):
-        return None
-    if not all(character in "0123456789abcdefABCDEF" for character in address[2:]):
-        return None
-    return address.lower()
-
-
 def split_watchlist_key(key):
-    if not isinstance(key, str) or ":" not in key:
-        return None, None
-
-    chain, token_address = key.split(":", 1)
-    return chain, normalize_evm_address(token_address)
+    return split_canonical_watchlist_key(key)
 
 
 def make_watchlist_key(chain, token_address):
-    normalized_address = normalize_evm_address(token_address)
-    if not chain or not normalized_address:
-        return None
-    return f"{chain}:{normalized_address}"
+    return canonical_watchlist_key(chain, token_address)
 
 
 def ensure_directories():
@@ -548,7 +537,7 @@ def normalize_watchlist_entry(key, entry, origin="watchlist"):
 
     key_chain, key_address = split_watchlist_key(key)
     chain = entry.get("chain_id") or entry.get("chain") or key_chain
-    token_address = normalize_evm_address(entry.get("token_address")) or key_address
+    token_address = normalize_token_address(chain, entry.get("token_address")) or key_address
     watchlist_key = entry.get("watchlist_key") or make_watchlist_key(chain, token_address) or key
 
     if not chain or not token_address:
@@ -591,7 +580,7 @@ def fetch_token_pairs(chain, token_address, session=requests):
 
 def fetch_token_pairs_batch(chain, token_addresses, session=requests):
     normalized_addresses = [
-        normalize_evm_address(token_address)
+        normalize_token_address(chain, token_address)
         for token_address in token_addresses
     ]
     normalized_addresses = [address for address in normalized_addresses if address]
@@ -613,7 +602,7 @@ def batched(items, batch_size):
         yield items[index:index + batch_size]
 
 
-def pair_token_addresses(pair):
+def pair_token_addresses(pair, chain=None):
     addresses = set()
     if not isinstance(pair, dict):
         return addresses
@@ -622,7 +611,7 @@ def pair_token_addresses(pair):
         token = pair.get(key)
         if not isinstance(token, dict):
             continue
-        address = normalize_evm_address(token.get("address"))
+        address = normalize_token_address(chain or pair.get("chainId"), token.get("address"))
         if address:
             addresses.add(address)
 
@@ -634,7 +623,7 @@ def map_pairs_to_tokens(tokens, pairs):
     mapped = {token["watchlist_key"]: [] for token in tokens}
 
     for pair in pairs:
-        for address in pair_token_addresses(pair):
+        for address in pair_token_addresses(pair, pair.get("chainId")):
             if address not in wanted:
                 continue
             for token in tokens:
@@ -702,7 +691,8 @@ def liquidity_usd(pair):
 
 
 def token_side_in_pair(pair, token_address):
-    normalized_token = normalize_evm_address(token_address)
+    chain = pair.get("chainId") if isinstance(pair, dict) else None
+    normalized_token = normalize_token_address(chain, token_address)
     if not normalized_token or not isinstance(pair, dict):
         return None
 
@@ -710,7 +700,7 @@ def token_side_in_pair(pair, token_address):
         token = pair.get(key)
         if not isinstance(token, dict):
             continue
-        if normalize_evm_address(token.get("address")) == normalized_token:
+        if normalize_token_address(chain, token.get("address")) == normalized_token:
             return side
 
     return None
@@ -837,10 +827,11 @@ def select_best_pair(pairs, entry):
     if not pairs:
         return None, "not_found"
 
-    pool_address = normalize_evm_address(entry.get("pool_address"))
+    chain = entry.get("chain") or entry.get("chain_id")
+    pool_address = normalize_token_address(chain, entry.get("pool_address"))
     if pool_address:
         for pair in pairs:
-            pair_address = normalize_evm_address(pair.get("pairAddress"))
+            pair_address = normalize_token_address(chain, pair.get("pairAddress"))
             if pair_address == pool_address:
                 return pair, "exact_pool"
 
@@ -1091,12 +1082,13 @@ def token_identity_from_pair(pair, token_address):
     if not isinstance(pair, dict):
         return {}
 
-    normalized_token = normalize_evm_address(token_address)
+    chain = pair.get("chainId")
+    normalized_token = normalize_token_address(chain, token_address)
     for side in ("baseToken", "quoteToken"):
         token = pair.get(side)
         if not isinstance(token, dict):
             continue
-        if normalize_evm_address(token.get("address")) != normalized_token:
+        if normalize_token_address(chain, token.get("address")) != normalized_token:
             continue
         return {
             "token_name": token.get("name"),
@@ -1222,6 +1214,14 @@ def prepare_promoted_entry(entry, current_time):
     return promoted
 
 
+def entries_for_circuit(entries, config, circuit):
+    return {
+        key: entry for key, entry in entries.items()
+        if not isinstance(entry, dict)
+        or circuit_enabled(config, entry.get("chain") or entry.get("chain_id"), circuit)
+    }
+
+
 def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
     retention_cfg = retention_config(config)
     buffer_cfg = ranking_buffer_config(config)
@@ -1232,8 +1232,19 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
     rejected = 0
     expired = 0
 
+    monitor_source = {}
+    if WATCHLIST_FILE == PROJECT_ROOT / "data" / "watchlist.json":
+        monitor_source = load_monitor_watchlist()
+
     with watchlist_lock():
         watchlist = load_watchlist()
+        for watchlist_key, entry in monitor_source.items():
+            if (
+                watchlist_key not in watchlist
+                and isinstance(entry, dict)
+                and entry.get("rank_bypass") is not True
+            ):
+                watchlist[watchlist_key] = entry.copy()
         buffer = load_json(buffer_path, {})
         if not isinstance(buffer, dict):
             buffer = {}
@@ -1343,7 +1354,8 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
                 }
             )
 
-        atomic_save_json(WATCHLIST_FILE, kept_watchlist)
+        inference_watchlist = entries_for_circuit(kept_watchlist, config, "inference")
+        atomic_save_json(WATCHLIST_FILE, inference_watchlist)
         atomic_save_json(buffer_path, buffer)
 
     # The Monitor WL deliberately receives the same ranked market population,
@@ -1353,7 +1365,11 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
         (
             (watchlist_key, entry)
             for watchlist_key, entry in kept_watchlist.items()
-            if isinstance(entry, dict) and ranking_score(entry) is not None
+            if (
+                isinstance(entry, dict)
+                and ranking_score(entry) is not None
+                and circuit_enabled(config, entry.get("chain") or entry.get("chain_id"), "monitor")
+            )
         ),
         key=lambda item: competitive_rank_key((item[0], item[1], "watchlist")),
         reverse=True,
@@ -1694,6 +1710,14 @@ def run_cycle(dry_run=False, session=requests):
     current_time = utc_now()
     now_text = to_iso(current_time)
     watchlist = load_watchlist()
+    if WATCHLIST_FILE == PROJECT_ROOT / "data" / "watchlist.json":
+        for watchlist_key, entry in load_monitor_watchlist().items():
+            if (
+                watchlist_key not in watchlist
+                and isinstance(entry, dict)
+                and entry.get("rank_bypass") is not True
+            ):
+                watchlist[watchlist_key] = entry
     ranking_buffer = load_ranking_buffer(config)
     state = load_state()
     rankable_tokens = select_rankable_tokens(watchlist) + select_rankable_tokens(

@@ -104,3 +104,15 @@ chains:
         type: uniswap_v2_factory
         factory_address: "0x8bcEaA40B9AcdfAedF85AdF4FF01F5Ad6517937f"
         event: PairCreated
+  solana:
+    enabled: true
+    family: solana
+    rpc_env: ALCHEMY_SOLANA_RPC_URL
+    quote_tokens:
+      SOL: "So11111111111111111111111111111111111111112"
+    sources:
+      - name: pumpswap
+        enabled: true
+        type: pumpswap_program
+        program_address: "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
+        instruction: CreatePool

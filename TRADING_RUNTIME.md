@@ -1,8 +1,8 @@
 # Monitor e Position multichain
 
-O runtime novo e independente da inferencia social. O Ranker grava a mesma
-classificacao de mercado em `data/watchlist.json` e
-`data/monitor_watchlist.json`; cada frente consome somente a sua watchlist.
+O runtime novo e independente da inferencia social. O Ranker mantem uma unica
+classificacao de mercado e publica cada chain somente nas watchlists habilitadas
+em `chain_routing`. Cada frente consome somente a sua watchlist.
 
 ## Comandos
 
@@ -25,6 +25,13 @@ python -m src.modules.scheduler drain
 python -m src.modules.scheduler stop_now
 ```
 
+Em um tmux dedicado, o Scheduler tambem pode ser iniciado pelo mesmo padrao dos
+demais processos:
+
+```bash
+./scripts/run_scheduler.sh
+```
+
 - `drain`: nao inicia novos Monitors. Monitors em andamento ainda podem abrir
   Positions; o runtime encerra quando todos terminarem.
 - `stop_now`: cancela Monitors e Positions imediatamente. Positions canceladas
@@ -35,14 +42,28 @@ python -m src.modules.scheduler stop_now
 ## Configuracao
 
 Os limites e tempos ficam em `config/config.yaml`, nas secoes `monitor`,
-`position` e `market_data`. Valores iniciais: cinco Monitors simultaneos, no
+`position` e `market_data`. `chain_routing` habilita inferencia, Monitor e o
+encaminhamento de alertas sociais por chain; `social_signal_routing` escolhe
+Telegram e/ou Monitor para cada tipo de sinal. Valores iniciais: cinco Monitors simultaneos, no
 maximo dois sociais dentro desses cinco, tres tentativas, 15 minutos por
 tentativa e cooldown de 15 minutos.
 
 Position usa somente ticks on-chain. Os endpoints HTTP, a chave da Alchemy
 Prices e os enderecos StateView V4 sao lidos do `.env`; os nomes esperados
-estao em `.env.example`. O adapter PumpSwap/Solana ja existe, mas somente
-recebera candidatos quando Solana for habilitada no Pool Scanner.
+estao em `.env.example`. O Pool Scanner Solana acompanha exclusivamente criacao
+de pools PumpSwap com quote SOL/WSOL nesta configuracao inicial.
+
+## Subida conjunta na VPS
+
+Com o KRPTO-V parado, iniciar em quatro tmux separados nesta ordem:
+
+1. `./scripts/run_pool_scanner.sh`
+2. `./scripts/run_market_ranker_loop.sh`
+3. `./scripts/run_social_inference_loop.sh`
+4. `./scripts/run_scheduler.sh`
+
+O Scheduler pode subir por ultimo: Pool e Ranker primeiro formam as watchlists;
+depois a inferencia e o Monitor passam a consumi-las.
 
 ## Arquivos de runtime
 

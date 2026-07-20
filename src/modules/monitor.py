@@ -18,6 +18,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import requests
 
+from src.modules.chain_identity import normalize_token_address
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 HISTORY_DIR = PROJECT_ROOT / "data" / "monitor" / "history"
@@ -278,9 +280,15 @@ def evaluate_entry(history: List[Dict[str, Any]], cfg: MonitorConfig) -> Dict[st
 
 
 def _select_pair(candidate: Dict[str, Any], pairs: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    expected = str(candidate.get("pool_address") or candidate.get("pair_address") or "").lower()
+    chain = candidate.get("chain") or candidate.get("chain_id")
+    expected = normalize_token_address(
+        chain, candidate.get("pool_address") or candidate.get("pair_address")
+    )
     if expected:
-        exact = next((pair for pair in pairs if str(pair.get("pairAddress") or "").lower() == expected), None)
+        exact = next(
+            (pair for pair in pairs if normalize_token_address(chain, pair.get("pairAddress")) == expected),
+            None,
+        )
         if exact: return exact
     return max(pairs, key=lambda p: _number((p.get("liquidity") or {}).get("usd")), default=None)
 

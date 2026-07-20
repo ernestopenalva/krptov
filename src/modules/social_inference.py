@@ -16,6 +16,13 @@ except ImportError:
     ZoneInfo = None
 
 from src.modules import telegram_notifier
+from src.modules.chain_identity import (
+    make_watchlist_key as canonical_watchlist_key,
+    normalize_evm_address,
+    normalize_token_address,
+    split_watchlist_key as split_canonical_watchlist_key,
+)
+from src.modules.chain_routing import load_routing_sections, social_actions
 from src.modules.monitor_watchlist import admit_social_alert
 
 
@@ -378,6 +385,7 @@ def load_config(config_file=CONFIG_FILE):
         config.get("telegram_alerts", {}),
         loaded_sections.get("telegram_alerts", {}),
     )
+    config.update(load_routing_sections(Path(config_file)))
     external_blacklist = load_username_file()
     if external_blacklist:
         combined = list(config.get("excluded_author_usernames", []) or []) + external_blacklist
@@ -475,35 +483,16 @@ def write_log_lines(lines, current_time):
 
 
 def normalize_ethereum_address(address):
-    if not isinstance(address, str):
-        return None
-
-    address = address.strip()
-
-    if len(address) != 42:
-        return None
-    if not address.startswith("0x"):
-        return None
-
-    hex_part = address[2:]
-    if not all(char in "0123456789abcdefABCDEF" for char in hex_part):
-        return None
-
-    return address.lower()
+    return normalize_evm_address(address)
 
 
 def make_watchlist_key(chain_id, token_address):
-    normalized_address = normalize_ethereum_address(token_address)
-    if not chain_id or not normalized_address:
-        return None
-
-    return f"{chain_id}:{normalized_address}"
+    return canonical_watchlist_key(chain_id, token_address)
 
 
 def split_watchlist_key(key):
     if isinstance(key, str) and ":" in key:
-        chain_id, token_address = key.split(":", 1)
-        return chain_id, normalize_ethereum_address(token_address)
+        return split_canonical_watchlist_key(key)
 
     return None, normalize_ethereum_address(key)
 
@@ -529,7 +518,7 @@ def migrate_watchlist_keys(watchlist):
 def normalize_watchlist_entry_layout(entry, watchlist_key):
     key_chain_id, key_token_address = split_watchlist_key(watchlist_key)
     chain_id = entry.get("chain_id") or entry.get("chain") or key_chain_id
-    token_address = normalize_ethereum_address(entry.get("token_address")) or key_token_address
+    token_address = normalize_token_address(chain_id, entry.get("token_address")) or key_token_address
 
     if chain_id:
         entry["chain"] = chain_id
@@ -1586,7 +1575,7 @@ def load_alerts():
 
 
 def alert_token_identity(chain_id, token_address):
-    normalized_address = normalize_ethereum_address(token_address)
+    normalized_address = normalize_token_address(chain_id, token_address)
     if not chain_id or not normalized_address:
         return None
     return f"{chain_id}:{normalized_address}"
@@ -1787,6 +1776,25 @@ def should_generate_alert(entry, analysis):
     return best_post_author_followers >= min_followers
 
 
+def social_signal_categories(analysis):
+    """Classify an already-approved alert without changing approval rules."""
+    reasons = set(analysis.get("alert_reasons") or [])
+    categories = set()
+    if "author_verified_type_business" in reasons:
+        categories.add("business_badge")
+    if "author_verified_type_government" in reasons:
+        categories.add("government_badge")
+    if "author_affiliation_found" in reasons:
+        categories.add("affiliation")
+    minimum = int(
+        analysis.get("min_author_followers_for_alert")
+        or DEFAULT_CONFIG["followers_alert_threshold"]
+    )
+    if int(analysis.get("best_post_author_followers") or 0) >= minimum:
+        categories.add("authors")
+    return categories
+
+
 def apply_alert(entry, analysis, current_time):
     entry["last_alert_at"] = to_iso(current_time)
     entry["last_alert_level"] = analysis["alert_rank"]
@@ -1844,6 +1852,14 @@ def mark_telegram_disabled(entry, alert, analysis):
     alert["telegram_alert_sent"] = False
     alert["telegram_alert_signature"] = analysis.get("alert_signature")
     alert["telegram_alert_error"] = "telegram_alerts.enabled=false"
+
+
+def mark_telegram_routing_suppressed(entry, alert, analysis):
+    entry["telegram_alert_sent"] = False
+    entry["telegram_alert_signature"] = analysis.get("alert_signature")
+    alert["telegram_alert_sent"] = False
+    alert["telegram_alert_signature"] = analysis.get("alert_signature")
+    alert["telegram_alert_suppressed_reason"] = "social_signal_routing"
 
 
 def build_history_record(token_address, status_before, entry, analysis, alert_generated, current_time, watchlist_key=None):
@@ -2299,20 +2315,28 @@ def run_cycle(config_file=CONFIG_FILE):
                     "best_followers_author_summary": alert.get("best_followers_author_summary"),
                     "best_affiliation_author_summary": alert.get("best_affiliation_author_summary"),
                 }
+                signal_categories = social_signal_categories(analysis)
+                actions = social_actions(config, chain_id, signal_categories)
+                alert["social_signal_categories"] = sorted(signal_categories)
+                alert["social_signal_actions"] = actions.copy()
                 admitted_to_monitor = False
-                if WATCHLIST_FILE == PROJECT_ROOT / "data" / "watchlist.json":
+                if actions["monitor"] and WATCHLIST_FILE == PROJECT_ROOT / "data" / "watchlist.json":
                     admitted_to_monitor = admit_social_alert(
                         watchlist_key,
                         entry,
                         social_monitor_snapshot,
                         admitted_at_utc=alert.get("timestamp"),
                     )
-                alert["monitor_admission_requested"] = True
+                alert["monitor_admission_requested"] = actions["monitor"]
                 alert["monitor_admitted"] = admitted_to_monitor
                 alert["monitor_admission_reason"] = (
-                    "social_fifo" if admitted_to_monitor else "already_in_monitor_circuit"
+                    "social_fifo" if admitted_to_monitor
+                    else "already_in_monitor_circuit" if actions["monitor"]
+                    else "social_signal_routing"
                 )
-                if telegram_config.get("enabled", True):
+                if not actions["telegram"]:
+                    mark_telegram_routing_suppressed(entry, alert, analysis)
+                elif telegram_config.get("enabled", True):
                     if should_send_telegram_alert(entry, analysis):
                         telegram_result = telegram_notifier.send_alert(
                             alert,
