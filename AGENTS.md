@@ -2,8 +2,10 @@
 
 ## Contexto Do Projeto
 
-- O projeto esta migrando o scanner antigo baseado em Dexscreener para um scanner de pools via Alchemy WebSocket.
-- O scanner novo fica em `src/modules/pool_scanner.py`.
+- O `pool_scanner.py` descobre exclusivamente pools EVM via Alchemy WebSocket.
+- Solana e descoberta separadamente em `src/modules/token_scanner_solana.py`, usando um provedor substituivel; inicialmente Dexscreener.
+- O scanner Solana admite apenas tokens Pump.fun graduados no PumpSwap/WSOL e escreve somente em `data/ranking_buffer.json`.
+- Jupiter enriquece os tokens Solana para observacao, mas seus dados nao sao filtro de admissao.
 - O ranqueador de mercado fica em `src/modules/market_ranker.py`.
 - A ferramenta diagnostica de pools fica em `src/tools/pool_diagnostics.py`.
 - A inferencia social fica em `src/modules/social_inference.py`.
@@ -67,6 +69,14 @@
 - V2, V3 e SushiSwap possuem `pool_address`.
 - Uniswap V4 nao possui `pool_address`; usar `pool_id` e `pool_manager_address`.
 - Eventos brutos/normalizados do scanner sao gravados em `data/pool_scanner/events_YYYY-MM-DD.jsonl`.
+
+## Token Scanner Solana
+
+- Executa um ciclo por chamada; o runner externo aguarda 60 segundos apos o termino.
+- Descobre perfis Solana na Dexscreener, exige Pump.fun/PumpSwap com quote WSOL e nao aplica filtros economicos.
+- Tokens ja emitidos sao deduplicados por estado compacto; candidatos ainda sem PumpSwap podem ser reavaliados.
+- Observacoes completas ficam em `data/token_scanner_solana/`; nao carregar `watchlist_archive.jsonl` para deduplicacao.
+- Nao escreve diretamente em nenhuma watchlist. O Market Ranker continua soberano e alimenta os circuitos conforme `chain_routing`.
 
 ## Ferramenta Diagnostica
 

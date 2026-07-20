@@ -10,13 +10,10 @@ from pathlib import Path
 
 import websockets
 import yaml
-import requests
 from dotenv import load_dotenv
 
-from src.modules.chain_identity import normalize_solana_address
 
-
-POOL_SCANNER_VERSION = "krptov-pool-scanner-v1-2026-05-31"
+POOL_SCANNER_VERSION = "krptov-pool-scanner-v2-evm-only-2026-07-20"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_FILE = PROJECT_ROOT / "config" / "pool_sources.yaml"
@@ -67,10 +64,6 @@ SOURCE_TYPES = {
         "address_field": "factory_address",
     },
 }
-
-PUMPSWAP_CREATE_POOL_DISCRIMINATOR = bytes([233, 146, 209, 142, 207, 104, 64, 188])
-BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-BASE58_VALUES = {character: index for index, character in enumerate(BASE58_ALPHABET)}
 
 PRESERVED_EXISTING_FIELDS = {
     "status",
@@ -255,14 +248,9 @@ def build_enabled_chains(config):
         if not rpc_url:
             raise RuntimeError(f"Defina {rpc_env} antes de iniciar a chain {chain_name}.")
 
-        family = str(chain_config.get("family") or "evm").lower()
         quote_tokens = {}
         for symbol, address in (chain_config.get("quote_tokens") or {}).items():
-            normalized = (
-                normalize_solana_address(address)
-                if family == "solana"
-                else normalize_evm_address(address)
-            )
+            normalized = normalize_evm_address(address)
             if not normalized:
                 raise ValueError(f"Quote token invalido em {chain_name}: {symbol}={address}")
             quote_tokens[normalized] = symbol
@@ -273,22 +261,6 @@ def build_enabled_chains(config):
                 continue
 
             source_type = source.get("type")
-            if family == "solana":
-                if source_type != "pumpswap_program":
-                    raise ValueError(f"Tipo Solana nao suportado: {source_type}")
-                program_address = normalize_solana_address(source.get("program_address"))
-                if not program_address:
-                    raise ValueError(f"program_address invalido em {chain_name}/{source.get('name')}.")
-                if source.get("instruction") != "CreatePool":
-                    raise ValueError(f"Instrucao invalida em {chain_name}/{source.get('name')}.")
-                sources.append({
-                    "chain": chain_name,
-                    "name": source["name"],
-                    "type": source_type,
-                    "program_address": program_address,
-                    "instruction": source["instruction"],
-                })
-                continue
             source_definition = SOURCE_TYPES.get(source_type)
             if not source_definition:
                 raise ValueError(f"Tipo de source nao suportado: {source_type}")
@@ -327,7 +299,7 @@ def build_enabled_chains(config):
             chains.append(
                 {
                     "name": chain_name,
-                    "family": family,
+                    "family": "evm",
                     "rpc_url": rpc_url,
                     "quote_tokens": quote_tokens,
                     "sources": sources,
@@ -482,8 +454,6 @@ def identify_new_token(
 
 
 def source_type_for(source):
-    if source["type"] == "pumpswap_program":
-        return "pool_created"
     if source["type"] == "uniswap_v4_pool_manager":
         return "pool_initialized"
     return "pool_created"
@@ -589,7 +559,6 @@ def build_raw_event_record(chain, source, raw_log, decoded_event, candidate, ign
         "source": source["name"],
         "source_type": source_type_for(source),
         "factory_address": source.get("factory_address"),
-        "program_address": source.get("program_address"),
         "decoded_event": decoded_event,
         "candidate": candidate,
         "ignored_reason": ignored_reason,
@@ -738,223 +707,7 @@ async def receive_until_stopped(ws, stop_event):
             await stop_task
 
 
-def decode_base58(value):
-    if not isinstance(value, str) or not value:
-        raise ValueError("Valor Base58 invalido")
-    number = 0
-    for character in value:
-        if character not in BASE58_VALUES:
-            raise ValueError("Valor Base58 invalido")
-        number = number * 58 + BASE58_VALUES[character]
-    decoded = number.to_bytes((number.bit_length() + 7) // 8, "big") if number else b""
-    return b"\0" * (len(value) - len(value.lstrip("1"))) + decoded
-
-
-def solana_http_url(rpc_url):
-    return str(rpc_url).replace("wss://", "https://", 1).replace("ws://", "http://", 1)
-
-
-def solana_ws_url(rpc_url):
-    return str(rpc_url).replace("https://", "wss://", 1).replace("http://", "ws://", 1)
-
-
-def solana_account_keys(message):
-    keys = []
-    for account in (message or {}).get("accountKeys") or []:
-        key = account.get("pubkey") if isinstance(account, dict) else account
-        keys.append(str(key) if key is not None else None)
-    return keys
-
-
-def solana_instruction_accounts(instruction, account_keys):
-    accounts = []
-    for account in instruction.get("accounts") or []:
-        if isinstance(account, int):
-            accounts.append(account_keys[account] if 0 <= account < len(account_keys) else None)
-        elif isinstance(account, dict):
-            accounts.append(account.get("pubkey"))
-        else:
-            accounts.append(account)
-    return accounts
-
-
-def iter_solana_instructions(transaction_result):
-    transaction = (transaction_result or {}).get("transaction") or {}
-    message = transaction.get("message") or {}
-    for instruction in message.get("instructions") or []:
-        yield instruction
-    meta = (transaction_result or {}).get("meta") or {}
-    for group in meta.get("innerInstructions") or []:
-        for instruction in group.get("instructions") or []:
-            yield instruction
-
-
-def decode_pumpswap_create_pool(transaction_result, program_address):
-    message = (((transaction_result or {}).get("transaction") or {}).get("message") or {})
-    account_keys = solana_account_keys(message)
-    for instruction in iter_solana_instructions(transaction_result):
-        program_id = instruction.get("programId")
-        if program_id is None and isinstance(instruction.get("programIdIndex"), int):
-            index = instruction["programIdIndex"]
-            program_id = account_keys[index] if 0 <= index < len(account_keys) else None
-        if program_id != program_address:
-            continue
-        try:
-            instruction_data = decode_base58(instruction.get("data"))
-        except ValueError:
-            continue
-        if not instruction_data.startswith(PUMPSWAP_CREATE_POOL_DISCRIMINATOR):
-            continue
-        accounts = solana_instruction_accounts(instruction, account_keys)
-        if len(accounts) < 5:
-            raise ValueError("CreatePool PumpSwap sem as contas obrigatorias")
-        pool, base_mint, quote_mint = accounts[0], accounts[3], accounts[4]
-        if not all(normalize_solana_address(value) for value in (pool, base_mint, quote_mint)):
-            raise ValueError("CreatePool PumpSwap contem conta invalida")
-        return {
-            "pool_address": pool,
-            "token0": base_mint,
-            "token1": quote_mint,
-            "fee": None,
-        }
-    return None
-
-
-def fetch_solana_transaction(rpc_url, signature, attempts=5):
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getTransaction",
-        "params": [signature, {
-            "encoding": "jsonParsed",
-            "commitment": "confirmed",
-            "maxSupportedTransactionVersion": 0,
-        }],
-    }
-    for attempt in range(attempts):
-        response = requests.post(solana_http_url(rpc_url), json=payload, timeout=20)
-        response.raise_for_status()
-        body = response.json()
-        if body.get("error"):
-            raise RuntimeError(f"getTransaction falhou: {body['error']}")
-        if body.get("result") is not None:
-            return body["result"]
-        if attempt + 1 < attempts:
-            time.sleep(0.4 * (attempt + 1))
-    return None
-
-
-def build_solana_watchlist_entry(chain_config, source, decoded_event, candidate, signature, slot, received_at_utc):
-    return {
-        "watchlist_key": f"{chain_config['name']}:{candidate['token_address']}",
-        "chain": chain_config["name"],
-        "chain_id": chain_config["name"],
-        "token_address": candidate["token_address"],
-        "token_symbol": None,
-        "token_name": None,
-        "pool_address": decoded_event["pool_address"],
-        "quote_token": candidate["quote_token"],
-        "quote_token_address": candidate["quote_token_address"],
-        "source": source["name"],
-        "source_type": "pool_created",
-        "program_address": source["program_address"],
-        "discovered_at_utc": received_at_utc,
-        "created_at_utc": received_at_utc,
-        "created_slot": slot,
-        "created_tx": signature,
-        "last_seen_at_utc": received_at_utc,
-        "times_seen": 1,
-        "status": "novo",
-        "social_status": "pendente",
-        "monitor_status": "pendente",
-        "status_reason": None,
-        "discarded_reason": None,
-        "telegram_alert_sent": False,
-        "scanner_validation_status": "approved",
-        "scanner_validation_reason": "pool_with_known_quote_token",
-        "ranking_status": "pending_dexscreener",
-        "ranking_first_seen_at_utc": received_at_utc,
-        "ranking_last_seen_at_utc": received_at_utc,
-        "ranking_attempts": 0,
-    }
-
-
-def process_solana_notification(chain_config, source, notification, dry_run):
-    value = ((notification.get("params") or {}).get("result") or {}).get("value") or {}
-    signature = value.get("signature")
-    logs = value.get("logs") or []
-    if not signature or value.get("err") is not None:
-        return "ignored"
-    if not any("Instruction: CreatePool" in str(line) for line in logs):
-        return "ignored"
-    transaction = fetch_solana_transaction(chain_config["rpc_url"], signature)
-    if not transaction:
-        raise RuntimeError(f"Transacao Solana ainda indisponivel: {signature}")
-    decoded_event = decode_pumpswap_create_pool(transaction, source["program_address"])
-    if not decoded_event:
-        return "ignored"
-    candidate, ignored_reason = identify_new_token(
-        decoded_event, chain_config["quote_tokens"], no_quote_reason="pool_without_known_quote_token"
-    )
-    received_at_utc = utc_now_iso()
-    raw_record = {
-        "scanner_version": POOL_SCANNER_VERSION,
-        "received_at_utc": received_at_utc,
-        "chain": chain_config["name"],
-        "source": source["name"],
-        "source_type": "pool_created",
-        "program_address": source["program_address"],
-        "decoded_event": decoded_event,
-        "candidate": candidate,
-        "ignored_reason": ignored_reason,
-        "signature": signature,
-        "slot": ((notification.get("params") or {}).get("result") or {}).get("context", {}).get("slot"),
-        "logs": logs,
-    }
-    append_jsonl(event_file_path(received_at_utc), raw_record)
-    print_pool_event(chain_config["name"], source, decoded_event, candidate, ignored_reason, dry_run)
-    if ignored_reason or dry_run:
-        return "ignored" if ignored_reason else "dry_run"
-    entry = build_solana_watchlist_entry(
-        chain_config, source, decoded_event, candidate, signature, raw_record["slot"], received_at_utc
-    )
-    action = upsert_ranking_buffer_entry(entry)
-    print(f"Ranking buffer: {action} | {entry['watchlist_key']}")
-    return action
-
-
-async def listen_solana_chain(chain_config, dry_run, stop_event):
-    async with websockets.connect(solana_ws_url(chain_config["rpc_url"])) as ws:
-        source = chain_config["sources"][0]
-        await ws.send(json.dumps({
-            "jsonrpc": "2.0", "id": 1, "method": "logsSubscribe",
-            "params": [{"mentions": [source["program_address"]]}, {"commitment": "confirmed"}],
-        }))
-        print(f"Conectado: {chain_config['name']}. Aguardando pools PumpSwap...")
-        subscribed = False
-        while not stop_event.is_set():
-            raw_message = await receive_until_stopped(ws, stop_event)
-            if raw_message is None:
-                return
-            message = json.loads(raw_message)
-            if message.get("error"):
-                raise RuntimeError(f"Erro retornado pelo RPC Solana: {message['error']}")
-            if message.get("id") == 1:
-                subscribed = True
-                print(f"Assinatura ativa: {chain_config['name']}/{source['name']}")
-                continue
-            if not subscribed or message.get("method") != "logsNotification":
-                continue
-            try:
-                await asyncio.to_thread(process_solana_notification, chain_config, source, message, dry_run)
-            except Exception as error:
-                print(f"Falha ao processar evento {chain_config['name']}/{source['name']}: {error}")
-
-
 async def listen_chain(chain_config, dry_run, stop_event):
-    if chain_config.get("family") == "solana":
-        await listen_solana_chain(chain_config, dry_run, stop_event)
-        return
     async with websockets.connect(chain_config["rpc_url"]) as ws:
         request_sources = await subscribe_sources(ws, chain_config)
         subscriptions = {}

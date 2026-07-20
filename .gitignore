@@ -15,6 +15,7 @@ data/*.jsonl
 data/social_posts/
 data/social_inference_usage_*.json
 data/pool_scanner/
+data/token_scanner_solana/
 data/pool_diagnostics/
 data/market_api_compare/
 data/monitor/

@@ -2,11 +2,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-import yaml
-
-from src.modules import market_ranker, pool_scanner, social_inference
+from src.modules import market_ranker, social_inference
 from src.modules.monitor import _select_pair
 from src.modules.chain_identity import make_watchlist_key, normalize_token_address
 from src.modules.chain_routing import circuit_enabled, load_routing_sections, social_actions
@@ -16,18 +13,6 @@ from src.tools.closed_position_report import load_closed_positions
 SOL_TOKEN = "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs"
 SOL_QUOTE = "So11111111111111111111111111111111111111112"
 SOL_POOL = "9wFFmGphLCQ26G2YGgboT7jHXfNTXLRz7E8QGR7w9a8p"
-PUMP_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
-
-
-def base58_encode(payload):
-    alphabet = pool_scanner.BASE58_ALPHABET
-    number = int.from_bytes(payload, "big")
-    encoded = ""
-    while number:
-        number, remainder = divmod(number, 58)
-        encoded = alphabet[remainder] + encoded
-    zeros = len(payload) - len(payload.lstrip(b"\0"))
-    return "1" * zeros + (encoded or "")
 
 
 class ChainIdentityTests(unittest.TestCase):
@@ -38,53 +23,6 @@ class ChainIdentityTests(unittest.TestCase):
             make_watchlist_key("base", "0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD"),
             "base:0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
         )
-
-
-class PumpSwapScannerTests(unittest.TestCase):
-    def pumpswap_transaction(self):
-        return {
-            "transaction": {"message": {"accountKeys": [], "instructions": [{
-                "programId": PUMP_PROGRAM,
-                "accounts": [SOL_POOL, SOL_TOKEN, SOL_TOKEN, SOL_TOKEN, SOL_QUOTE],
-                "data": base58_encode(pool_scanner.PUMPSWAP_CREATE_POOL_DISCRIMINATOR + b"payload"),
-            }]}},
-            "meta": {"innerInstructions": []},
-        }
-
-    def test_pumpswap_create_pool_is_decoded_from_official_account_order(self):
-        decoded = pool_scanner.decode_pumpswap_create_pool(self.pumpswap_transaction(), PUMP_PROGRAM)
-        self.assertEqual(decoded["pool_address"], SOL_POOL)
-        self.assertEqual(decoded["token0"], SOL_TOKEN)
-        self.assertEqual(decoded["token1"], SOL_QUOTE)
-
-    def test_pool_sources_enable_only_pumpswap_for_solana(self):
-        config = yaml.safe_load((pool_scanner.PROJECT_ROOT / "config" / "pool_sources.yaml").read_text())
-        with patch.dict("os.environ", {"ALCHEMY_SOLANA_RPC_URL": "https://example.invalid"}, clear=False):
-            config["chains"] = {"solana": config["chains"]["solana"]}
-            chain = pool_scanner.build_enabled_chains(config)[0]
-        self.assertEqual(chain["family"], "solana")
-        self.assertEqual([source["name"] for source in chain["sources"]], ["pumpswap"])
-
-    def test_notification_writes_base58_candidate_to_ranking_buffer(self):
-        chain = {"name": "solana", "rpc_url": "https://example.invalid",
-                 "quote_tokens": {SOL_QUOTE: "SOL"}}
-        source = {"name": "pumpswap", "type": "pumpswap_program", "program_address": PUMP_PROGRAM}
-        notification = {"params": {"result": {"context": {"slot": 123}, "value": {
-            "signature": "signature", "err": None,
-            "logs": ["Program log: Instruction: CreatePool"],
-        }}}}
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            with patch.object(pool_scanner, "DATA_DIR", root), patch.object(
-                pool_scanner, "RANKING_BUFFER_FILE", root / "ranking_buffer.json"
-            ), patch.object(pool_scanner, "WATCHLIST_LOCK_FILE", root / "watchlist.lock"), patch.object(
-                pool_scanner, "fetch_solana_transaction", return_value=self.pumpswap_transaction()
-            ), patch.object(pool_scanner, "event_file_path", return_value=root / "events.jsonl"):
-                action = pool_scanner.process_solana_notification(chain, source, notification, False)
-            buffer = json.loads((root / "ranking_buffer.json").read_text(encoding="utf-8"))
-        self.assertEqual(action, "created")
-        self.assertIn(f"solana:{SOL_TOKEN}", buffer)
-        self.assertEqual(buffer[f"solana:{SOL_TOKEN}"]["pool_address"], SOL_POOL)
 
 
 class RoutingTests(unittest.TestCase):

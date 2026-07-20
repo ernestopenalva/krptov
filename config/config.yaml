@@ -4,19 +4,29 @@ system_wake_window:
   start: "10:00"
   end: "02:00"
 
-token_scanner:
-  chain_ids:
-    - ethereum
-    - base
-
-  watchlist_max_tokens: 10
-  watchlist_infinite: true
-
-  feed_disappearance_minutes: 60
-
-  discard_retention_hours: 168
-
+token_scanner_solana:
+  enabled: true
+  discovery_provider: "dexscreener"
+  chain_id: "solana"
+  allowed_dex_id: "pumpswap"
+  quote_token: "SOL"
+  quote_token_address: "So11111111111111111111111111111111111111112"
+  require_pump_mint_suffix: true
   cycle_interval_seconds: 60
+  request_timeout_seconds: 20
+  rate_limit_backoff_seconds: 10
+  emitted_retention_hours: 24
+  state_file: "data/token_scanner_solana/state.json"
+  audit_dir: "data/token_scanner_solana"
+
+  # Jupiter enriquece a observacao, mas nunca aprova ou reprova o token.
+  jupiter:
+    quote_url: "https://api.jup.ag/swap/v1/quote"
+    token_search_url: "https://api.jup.ag/tokens/v2/search"
+    api_key_env: "JUPITER_API_KEY"
+    buy_amount_lamports: 10000000
+    sell_amount_raw: 1000000
+    slippage_bps: 100
 
 social_inference:
   enabled: true

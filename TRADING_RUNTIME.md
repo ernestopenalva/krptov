@@ -50,20 +50,28 @@ tentativa e cooldown de 15 minutos.
 
 Position usa somente ticks on-chain. Os endpoints HTTP, a chave da Alchemy
 Prices e os enderecos StateView V4 sao lidos do `.env`; os nomes esperados
-estao em `.env.example`. O Pool Scanner Solana acompanha exclusivamente criacao
-de pools PumpSwap com quote SOL/WSOL nesta configuracao inicial.
+estao em `.env.example`.
+
+O Pool Scanner permanece exclusivamente EVM. Solana e descoberta pelo
+`token_scanner_solana`, via Dexscreener, somente para tokens Pump.fun ja
+graduados em pools PumpSwap com quote SOL/WSOL. O scanner preserva as metricas
+Jupiter para observacao, sem usa-las como filtro, e escreve apenas no ranking
+buffer. O Ranker continua responsavel pelas duas watchlists.
 
 ## Subida conjunta na VPS
 
-Com o KRPTO-V parado, iniciar em quatro tmux separados nesta ordem:
+Com o KRPTO-V parado, iniciar em cinco tmux separados nesta ordem:
 
 1. `./scripts/run_pool_scanner.sh`
-2. `./scripts/run_market_ranker_loop.sh`
-3. `./scripts/run_social_inference_loop.sh`
-4. `./scripts/run_scheduler.sh`
+2. `bash scripts/run_token_scanner_solana_loop.sh`
+3. `./scripts/run_market_ranker_loop.sh`
+4. `./scripts/run_social_inference_loop.sh`
+5. `./scripts/run_scheduler.sh`
 
-O Scheduler pode subir por ultimo: Pool e Ranker primeiro formam as watchlists;
-depois a inferencia e o Monitor passam a consumi-las.
+O Scheduler pode subir por ultimo: os dois scanners e o Ranker primeiro formam
+as watchlists; depois a inferencia e o Monitor passam a consumi-las. Cada
+chamada do scanner Solana executa um ciclo completo e o runner espera 60
+segundos depois do termino antes de iniciar o proximo.
 
 ## Arquivos de runtime
 
@@ -76,5 +84,8 @@ depois a inferencia e o Monitor passam a consumi-las.
 - `data/trading_history.jsonl`: eventos finais de Monitor e Position.
 - `data/trading_runtime/status.json`: fotografia operacional consultada por
   `status`.
+- `data/token_scanner_solana/state.json`: deduplicacao compacta da descoberta.
+- `data/token_scanner_solana/observations_YYYY-MM-DD.jsonl`: perfil, pool e
+  observacao Jupiter de cada token emitido.
 
 Em modo paper nao ha reconexao com Positions vivas de uma execucao anterior.

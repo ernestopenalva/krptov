@@ -54,7 +54,7 @@ run_module() {
 cd "${PROJECT_ROOT}"
 
 log "=== KRPTO-V | Pipeline limitado ==="
-log "Rodadas do token scanner: ${TOTAL_CYCLES}"
+log "Rodadas do Token Scanner Solana + Market Ranker: ${TOTAL_CYCLES}"
 log "Intervalo entre rodadas: ${SCANNER_INTERVAL_SECONDS}s"
 log "Inferencia social: a cada ${SOCIAL_EVERY_CYCLES} rodadas"
 log "Log da sessao: ${SESSION_LOG}"
@@ -67,7 +67,9 @@ for ((cycle = 1; cycle <= TOTAL_CYCLES; cycle++)); do
     fi
 
     log "Rodada ${cycle}/${TOTAL_CYCLES}: iniciando token scanner"
-    run_module "src.modules.token_scanner"
+    run_module "src.modules.token_scanner_solana"
+    log "Rodada ${cycle}/${TOTAL_CYCLES}: iniciando market ranker"
+    run_module "src.modules.market_ranker"
 
     if ((cycle % SOCIAL_EVERY_CYCLES == 0)); then
         log "Rodada ${cycle}/${TOTAL_CYCLES}: iniciando inferencia social"
