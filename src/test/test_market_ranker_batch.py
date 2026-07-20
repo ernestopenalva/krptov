@@ -256,6 +256,35 @@ class MarketRankerBatchTests(unittest.TestCase):
         self.assertEqual(busd_metrics["quote_liquidity_symbol"], "BUSD")
         self.assertEqual(busd_metrics["quote_liquidity_usd"], 1000)
 
+    def test_solana_quotes_are_trusted_for_quote_liquidity(self):
+        token_address = "5wAr8gMm8KpgkGEiAhiBBdKBXFQsyChuLdw4KHuVpump"
+        for quote_symbol in ("SOL", "WSOL"):
+            with self.subTest(quote_symbol=quote_symbol):
+                pair = {
+                    "chainId": "solana",
+                    "dexId": "pumpswap",
+                    "pairAddress": "5AUgLVM64n9GnmijM8BXNnGshKNBmzCtaiHybte4Tzce",
+                    "baseToken": {
+                        "address": token_address,
+                        "symbol": "MEOW",
+                        "name": "Meowpin",
+                    },
+                    "quoteToken": {
+                        "address": "So11111111111111111111111111111111111111112",
+                        "symbol": quote_symbol,
+                        "name": "Wrapped SOL",
+                    },
+                    "priceNative": "0.002",
+                    "priceUsd": "0.4",
+                    "liquidity": {"usd": 20_000, "base": 25_000, "quote": 50},
+                }
+
+                metrics = market_ranker.quote_liquidity_metrics(pair, token_address)
+
+                self.assertEqual(metrics["quote_liquidity_symbol"], quote_symbol)
+                self.assertEqual(metrics["quote_liquidity_amount"], 50)
+                self.assertEqual(metrics["quote_liquidity_usd"], 10_000)
+
     def test_watchlist_retention_applies_rank_cap_without_removing_protected(self):
         current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
 

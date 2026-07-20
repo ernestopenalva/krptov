@@ -57,6 +57,8 @@ TRUSTED_QUOTE_SYMBOLS = {
     "WBNB",
     "ETH",
     "WETH",
+    "SOL",
+    "WSOL",
     "USDC",
     "USDT",
     "USDBC",
