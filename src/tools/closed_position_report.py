@@ -11,10 +11,12 @@ from datetime import datetime
 from pathlib import Path
 from statistics import mean
 from typing import Any, Dict, Iterable, Optional
+from zoneinfo import ZoneInfo
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HISTORY_FILE = PROJECT_ROOT / "data" / "trading_history.jsonl"
+BRASILIA = ZoneInfo("America/Sao_Paulo")
 
 
 def safe_float(value: Any) -> Optional[float]:
@@ -43,7 +45,13 @@ def load_closed_positions(path: Path) -> Iterable[Dict[str, Any]]:
             minimum = safe_float(position.get("min_price_usd"))
             maximum = safe_float(position.get("highest_price_usd"))
             chain = str(position.get("chain") or signal.get("chain") or signal.get("chain_id") or "unknown").lower()
-            symbol = position.get("symbol") or signal.get("token_symbol") or signal.get("symbol") or "-"
+            symbol = (
+                signal.get("token_symbol")
+                or signal.get("token_name")
+                or signal.get("symbol")
+                or position.get("symbol")
+                or "-"
+            )
             quote = signal.get("quote_token") or tick.get("raw", {}).get("quote_symbol") or "-"
             yield {
                 "entry_time": position.get("entry_time"),
@@ -66,9 +74,12 @@ def parse_time(value: Any) -> Optional[datetime]:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=BRASILIA)
+    return parsed.astimezone(BRASILIA)
 
 
 def fmt_time(value: Any) -> str:
@@ -83,9 +94,19 @@ def fmt_pct(value: Optional[float]) -> str:
 def fmt_price(value: Optional[float]) -> str:
     if value is None:
         return "-"
-    if value == 0 or abs(value) >= 1:
+    if value == 0:
+        return "US$0.00"
+    if abs(value) >= 1:
         return f"US${value:,.2f}"
-    return f"US${value:.10g}"
+    exponent = math.floor(math.log10(abs(value)))
+    decimals = max(0, 3 - exponent)
+    fixed = f"{value:.{decimals}f}"
+    integer, fraction = fixed.split(".")
+    leading_zeros = len(fraction) - len(fraction.lstrip("0"))
+    if leading_zeros >= 4:
+        subscript = str(leading_zeros).translate(str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉"))
+        return f"US$0.0{subscript}{fraction[leading_zeros:]}"
+    return f"US${integer}.{fraction}"
 
 
 def summary(rows):
