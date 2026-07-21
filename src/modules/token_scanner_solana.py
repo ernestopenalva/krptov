@@ -211,6 +211,40 @@ def liquidity_usd(pair: Dict[str, Any]) -> float:
         return 0.0
 
 
+def optional_number(value: Any) -> Optional[float]:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def technical_eligibility(
+    pair: Dict[str, Any], config: Dict[str, Any], observed_at: str
+) -> Dict[str, Any]:
+    filters = config.get("technical_entry_filters") or {}
+    changes = pair.get("priceChange") or {}
+    m5 = optional_number(changes.get("m5"))
+    h1 = optional_number(changes.get("h1"))
+    max_m5 = optional_number(filters.get("max_price_change_m5"))
+    max_h1 = optional_number(filters.get("max_price_change_h1"))
+    reasons = []
+    if m5 is not None and max_m5 is not None and m5 > max_m5:
+        reasons.append("price_change_m5_above_max")
+    if h1 is not None and max_h1 is not None and h1 > max_h1:
+        reasons.append("price_change_h1_above_max")
+    return {
+        "technical_eligibility": "blocked_exhaustion" if reasons else "eligible",
+        "technical_eligibility_reason": ",".join(reasons) if reasons else "initial_market_snapshot_ok",
+        "technical_eligibility_updated_at_utc": observed_at,
+        "technical_filter_snapshot": {
+            "price_change_m5": m5,
+            "price_change_h1": h1,
+            "max_price_change_m5": max_m5,
+            "max_price_change_h1": max_h1,
+        },
+    }
+
+
 def select_pumpswap_pair(
     pairs: List[Dict[str, Any]], token_address: str, config: Dict[str, Any]
 ) -> Optional[Dict[str, Any]]:
@@ -332,6 +366,7 @@ def build_buffer_entry(
     key = make_watchlist_key(chain, token_address)
     base = pair_token(pair, "baseToken")
     quote = pair_token(pair, "quoteToken")
+    technical = technical_eligibility(pair, config, observed_at)
     return {
         "watchlist_key": key,
         "chain": chain,
@@ -359,6 +394,7 @@ def build_buffer_entry(
         "discarded_reason": None,
         "scanner_validation_status": "approved",
         "scanner_validation_reason": "dexscreener_pumpswap_wsol",
+        **technical,
         "ranking_status": "pending_dexscreener",
         "ranking_first_seen_at_utc": observed_at,
         "ranking_last_seen_at_utc": observed_at,
@@ -456,7 +492,7 @@ def run_scanner_cycle(
     pending = profiles_to_process(profiles, config, state, known)
     addresses = [profile["tokenAddress"] for profile in pending]
     pairs = provider.pairs_for_tokens(str(config.get("chain_id") or "solana"), addresses) if addresses else []
-    emitted = duplicates = waiting = jupiter_unavailable = 0
+    emitted = duplicates = waiting = jupiter_unavailable = technical_social_only = 0
 
     for profile in pending:
         address = profile["tokenAddress"]
@@ -472,6 +508,8 @@ def run_scanner_cycle(
         if not jupiter["summary"].get("available"):
             jupiter_unavailable += 1
         entry = build_buffer_entry(address, profile, pair, jupiter, config, observed_at)
+        if entry.get("technical_eligibility") == "blocked_exhaustion":
+            technical_social_only += 1
         action = "dry_run" if dry_run else admit_to_buffer(entry)
         if action == "created":
             emitted += 1
@@ -491,6 +529,11 @@ def run_scanner_cycle(
                 "profile": profile,
                 "selected_pair": pair,
                 "jupiter": jupiter,
+                "technical_eligibility": {
+                    "status": entry.get("technical_eligibility"),
+                    "reason": entry.get("technical_eligibility_reason"),
+                    "snapshot": entry.get("technical_filter_snapshot"),
+                },
             })
 
     if not dry_run:
@@ -498,6 +541,7 @@ def run_scanner_cycle(
     return {
         "profiles": len(profiles), "new_profiles": len(pending), "pairs": len(pairs),
         "emitted": emitted, "duplicates": duplicates, "waiting_pumpswap": waiting,
+        "technical_social_only": technical_social_only,
         "jupiter_unavailable": jupiter_unavailable, "state_pruned": pruned, "dry_run": dry_run,
     }
 

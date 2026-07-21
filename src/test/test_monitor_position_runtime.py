@@ -149,6 +149,18 @@ class MonitorStrategyTests(unittest.TestCase):
         self.assertTrue(result["entry"])
         self.assertEqual(result["entry_reason"], "PULLBACK_RECOVERY")
 
+    def test_campaign_peak_from_previous_attempt_blocks_fresh_local_momentum(self):
+        history = self.history([100, 102, 105])
+        result = evaluate_momentum(
+            history,
+            MonitorConfig(),
+            campaign_first_price=100,
+            campaign_peak_price=150,
+        )
+        self.assertFalse(result["entry"])
+        self.assertEqual(result["reason"], "momentum longe do topo")
+        self.assertEqual(result["metrics"]["campaign_peak_price_usd"], 150)
+
 
 class FakeEvmRpc:
     def __init__(self, calls):
@@ -242,6 +254,52 @@ class MonitorWatchlistTests(unittest.TestCase):
         self.assertEqual(entry["market_score"], 99)
         self.assertEqual(entry["monitor_attempts"], 1)
         self.assertTrue(entry["rank_bypass"])
+
+    def test_campaign_prices_survive_cooldown_and_rank_refresh(self):
+        row = {"watchlist_key": "base:campaign", "market_score": 50}
+        store.sync_ranked_watchlist([("base:campaign", row)])
+        store.mutate_entry("base:campaign", {
+            "campaign_first_price_usd": 100,
+            "campaign_first_price_at_utc": "2026-01-01T00:00:00+00:00",
+            "campaign_peak_price_usd": 150,
+            "campaign_peak_price_at_utc": "2026-01-01T00:01:00+00:00",
+        })
+        store.finish_monitor_attempt(
+            "base:campaign",
+            {"outcome": "no_buy", "reason": "monitor_timeout"},
+            max_attempts=3,
+            cooldown_minutes=15,
+            now=datetime(2026, 1, 1, 0, 2, tzinfo=timezone.utc),
+        )
+        store.sync_ranked_watchlist([("base:campaign", {**row, "market_score": 60})])
+        entry = store.load_monitor_watchlist()["base:campaign"]
+        self.assertEqual(entry["campaign_first_price_usd"], 100)
+        self.assertEqual(entry["campaign_peak_price_usd"], 150)
+        reserved = store.reserve_next_candidate(
+            active_keys=set(), active_social=0, max_social=2, max_attempts=3,
+            now=datetime(2026, 1, 1, 0, 17, tzinfo=timezone.utc),
+        )
+        self.assertEqual(reserved[1]["campaign_first_price_usd"], 100)
+        self.assertEqual(reserved[1]["campaign_peak_price_usd"], 150)
+
+    def test_social_alert_redeems_technical_exhaustion_with_audit_fields(self):
+        row = {
+            "watchlist_key": "solana:blocked",
+            "chain": "solana",
+            "technical_eligibility": "blocked_exhaustion",
+            "technical_eligibility_reason": "price_change_m5_above_max",
+        }
+        admitted = store.admit_social_alert(
+            "solana:blocked", row, {"alert_reasons": ["authors"]},
+            "2026-01-01T00:00:00+00:00",
+        )
+        self.assertTrue(admitted)
+        entry = store.load_monitor_watchlist()["solana:blocked"]
+        self.assertTrue(entry["rank_bypass"])
+        self.assertEqual(entry["admission_source"], "social_alert")
+        self.assertEqual(entry["technical_admission_override"], "social_alert")
+        self.assertEqual(entry["technical_redemption_original_eligibility"], "blocked_exhaustion")
+        self.assertEqual(entry["technical_redemption_original_reason"], "price_change_m5_above_max")
 
     def test_social_fifo_precedes_technical_and_respects_cap(self):
         store.sync_ranked_watchlist([("base:t", {"watchlist_key": "base:t", "market_score": 99})])

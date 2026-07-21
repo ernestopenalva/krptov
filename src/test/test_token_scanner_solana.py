@@ -15,7 +15,7 @@ WSOL = "So11111111111111111111111111111111111111112"
 POOL = "5AUgLVM64n9GnmijM8BXNnGshKNBmzCtaiHybte4Tzce"
 
 
-def pair(dex="pumpswap", quote=WSOL, liquidity=1):
+def pair(dex="pumpswap", quote=WSOL, liquidity=1, price_change_m5=-90, price_change_h1=0):
     return {
         "chainId": "solana",
         "dexId": dex,
@@ -26,7 +26,7 @@ def pair(dex="pumpswap", quote=WSOL, liquidity=1):
         "liquidity": {"usd": liquidity},
         "volume": {"h24": 2},
         "txns": {"h24": {"buys": 1, "sells": 0}},
-        "priceChange": {"m5": -90},
+        "priceChange": {"m5": price_change_m5, "h1": price_change_h1},
     }
 
 
@@ -53,6 +53,10 @@ def config(root):
         "require_pump_mint_suffix": True,
         "discovery_provider": "dexscreener",
         "emitted_retention_hours": 24,
+        "technical_entry_filters": {
+            "max_price_change_m5": 20,
+            "max_price_change_h1": 200,
+        },
         "state_file": root / "scanner" / "state.json",
         "audit_dir": root / "scanner",
         "request_timeout_seconds": 1,
@@ -132,6 +136,31 @@ class TokenScannerSolanaTests(unittest.TestCase):
                 result = scanner.run_scanner_cycle(config(root), provider=second)
             self.assertEqual(result["new_profiles"], 0)
             self.assertEqual(second.pair_calls, 0)
+
+    def test_exhausted_token_is_emitted_as_social_only_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            provider = FakeProvider([pair(price_change_m5=41.23, price_change_h1=170)])
+            with self.runtime_patches(root), patch.object(
+                scanner, "observe_jupiter", return_value=unavailable_jupiter("2026-07-20T12:00:00Z")
+            ):
+                result = scanner.run_scanner_cycle(config(root), provider=provider)
+            buffer = json.loads((root / "ranking_buffer.json").read_text(encoding="utf-8"))
+            entry = buffer[f"solana:{TOKEN}"]
+            self.assertEqual(result["emitted"], 1)
+            self.assertEqual(result["technical_social_only"], 1)
+            self.assertEqual(entry["technical_eligibility"], "blocked_exhaustion")
+            self.assertEqual(entry["technical_eligibility_reason"], "price_change_m5_above_max")
+            self.assertEqual(entry["technical_filter_snapshot"]["price_change_m5"], 41.23)
+
+    def test_h1_exhaustion_is_independently_blocked(self):
+        eligibility = scanner.technical_eligibility(
+            pair(price_change_m5=10, price_change_h1=201),
+            config(Path("unused")),
+            "2026-07-20T12:00:00Z",
+        )
+        self.assertEqual(eligibility["technical_eligibility"], "blocked_exhaustion")
+        self.assertEqual(eligibility["technical_eligibility_reason"], "price_change_h1_above_max")
 
     def test_token_without_pumpswap_can_be_reconsidered_next_cycle(self):
         with tempfile.TemporaryDirectory() as directory:

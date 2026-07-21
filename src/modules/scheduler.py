@@ -161,6 +161,17 @@ class Scheduler:
 
     async def _monitor_tick(self, watchlist_key: str, tick: Dict[str, Any]) -> None:
         self.last_monitor_ticks[watchlist_key] = tick
+        await asyncio.to_thread(
+            mutate_entry,
+            watchlist_key,
+            {
+                "monitor_last_tick_at_utc": tick.get("timestamp"),
+                "campaign_first_price_usd": tick.get("campaign_first_price_usd"),
+                "campaign_first_price_at_utc": tick.get("campaign_first_price_at_utc"),
+                "campaign_peak_price_usd": tick.get("campaign_peak_price_usd"),
+                "campaign_peak_price_at_utc": tick.get("campaign_peak_price_at_utc"),
+            },
+        )
 
     def _archive_completed(self) -> None:
         for key, entry in pop_completed_entries():

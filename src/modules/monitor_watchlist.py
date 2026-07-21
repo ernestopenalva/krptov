@@ -28,6 +28,10 @@ RUNTIME_FIELDS = {
     "social_enqueued_at_utc",
     "social_ready_at_utc",
     "social_alert_snapshot",
+    "technical_admission_override",
+    "technical_redeemed_at_utc",
+    "technical_redemption_original_eligibility",
+    "technical_redemption_original_reason",
     "monitor_status",
     "monitor_attempts",
     "monitor_started_at_utc",
@@ -39,6 +43,10 @@ RUNTIME_FIELDS = {
     "monitor_session_id",
     "monitor_attempt_id",
     "position_id",
+    "campaign_first_price_usd",
+    "campaign_first_price_at_utc",
+    "campaign_peak_price_usd",
+    "campaign_peak_price_at_utc",
 }
 
 # Social-inference state belongs only to the original WL.  These fields must
@@ -231,6 +239,10 @@ def admit_social_alert(
             "social_alert_snapshot": alert_snapshot,
             "monitor_status": "eligible",
             "monitor_attempts": int(entry.get("monitor_attempts") or 0),
+            "technical_admission_override": "social_alert",
+            "technical_redeemed_at_utc": admitted_at,
+            "technical_redemption_original_eligibility": source_entry.get("technical_eligibility"),
+            "technical_redemption_original_reason": source_entry.get("technical_eligibility_reason"),
         })
         watchlist[watchlist_key] = entry
         _save_unlocked(watchlist)

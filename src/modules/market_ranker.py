@@ -1220,7 +1220,13 @@ def entries_for_circuit(entries, config, circuit):
     return {
         key: entry for key, entry in entries.items()
         if not isinstance(entry, dict)
-        or circuit_enabled(config, entry.get("chain") or entry.get("chain_id"), circuit)
+        or (
+            circuit_enabled(config, entry.get("chain") or entry.get("chain_id"), circuit)
+            and not (
+                circuit == "monitor"
+                and str(entry.get("technical_eligibility") or "").startswith("blocked_")
+            )
+        )
     }
 
 
@@ -1363,14 +1369,14 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
     # The Monitor WL deliberately receives the same ranked market population,
     # but none of the social-inference runtime state.  It has its own lock and
     # ownership rules, so do this only after releasing the primary WL lock.
+    monitor_entries = entries_for_circuit(kept_watchlist, config, "monitor")
     monitor_ranked_entries = sorted(
         (
             (watchlist_key, entry)
-            for watchlist_key, entry in kept_watchlist.items()
+            for watchlist_key, entry in monitor_entries.items()
             if (
                 isinstance(entry, dict)
                 and ranking_score(entry) is not None
-                and circuit_enabled(config, entry.get("chain") or entry.get("chain_id"), "monitor")
             )
         ),
         key=lambda item: competitive_rank_key((item[0], item[1], "watchlist")),

@@ -19,6 +19,12 @@ token_scanner_solana:
   state_file: "data/token_scanner_solana/state.json"
   audit_dir: "data/token_scanner_solana"
 
+  # Filtros de exaustao recuperados do KRPTO3. Uma reprovação aqui bloqueia
+  # somente a admissao tecnica direta; o token continua elegivel ao social.
+  technical_entry_filters:
+    max_price_change_m5: 20
+    max_price_change_h1: 200
+
   # Jupiter enriquece a observacao, mas nunca aprova ou reprova o token.
   jupiter:
     quote_url: "https://api.jup.ag/swap/v1/quote"

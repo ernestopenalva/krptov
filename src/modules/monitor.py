@@ -206,13 +206,20 @@ def compute_health(
             "hard_deterioration": hard, "reason": " | ".join(reasons), "metrics": metrics}
 
 
-def evaluate_momentum(history: List[Dict[str, Any]], cfg: MonitorConfig) -> Dict[str, Any]:
+def evaluate_momentum(
+    history: List[Dict[str, Any]],
+    cfg: MonitorConfig,
+    campaign_first_price: Optional[float] = None,
+    campaign_peak_price: Optional[float] = None,
+) -> Dict[str, Any]:
     if not cfg.momentum_enabled or len(history) < cfg.momentum_min_ticks:
         return {"entry": False, "reason": "historico insuficiente para momentum"}
     prices = [tick["price_usd"] for tick in history if tick.get("price_usd", 0) > 0]
     if len(prices) < cfg.momentum_min_ticks:
         return {"entry": False, "reason": "precos insuficientes para momentum"}
-    current, first, peak = history[-1], prices[0], max(prices)
+    current = history[-1]
+    first = campaign_first_price if campaign_first_price and campaign_first_price > 0 else prices[0]
+    peak = max(max(prices), campaign_peak_price or 0)
     runup = (current["price_usd"] / first - 1) * 100
     pullback = (peak - current["price_usd"]) / peak * 100
     liquidities = [tick["liquidity_usd"] for tick in history if tick.get("liquidity_usd", 0) > 0]
@@ -224,6 +231,7 @@ def evaluate_momentum(history: List[Dict[str, Any]], cfg: MonitorConfig) -> Dict
     recent_prices = prices[-max(1, cfg.momentum_price_falling_window_ticks):]
     falling = cfg.momentum_block_if_price_falling and current["price_usd"] < sum(recent_prices) / len(recent_prices)
     metrics = {"entry_reason": "MOMENTUM_CONTINUATION", "runup_since_first_tick_pct": runup,
+               "campaign_first_price_usd": first, "campaign_peak_price_usd": peak,
                "pullback_from_peak_pct": pullback, "liquidity_growth_pct": growth,
                "liquidity_drop_pct": drop, "health_score": health["score"],
                "buy_pressure": current.get("buy_pressure", 0)}
@@ -239,9 +247,14 @@ def evaluate_momentum(history: List[Dict[str, Any]], cfg: MonitorConfig) -> Dict
     return {"entry": True, "entry_reason": "MOMENTUM_CONTINUATION", "reason": "momentum_continuation", "metrics": metrics}
 
 
-def evaluate_entry(history: List[Dict[str, Any]], cfg: MonitorConfig) -> Dict[str, Any]:
+def evaluate_entry(
+    history: List[Dict[str, Any]],
+    cfg: MonitorConfig,
+    campaign_first_price: Optional[float] = None,
+    campaign_peak_price: Optional[float] = None,
+) -> Dict[str, Any]:
     if len(history) < cfg.pullback_min_ticks:
-        momentum = evaluate_momentum(history, cfg)
+        momentum = evaluate_momentum(history, cfg, campaign_first_price, campaign_peak_price)
         return momentum if momentum.get("entry") or momentum.get("blocked") else {"entry": False, "reason": "historico insuficiente"}
     window = _recent(history, cfg)
     prices = [tick["price_usd"] for tick in window if tick.get("price_usd", 0) > 0]
@@ -258,7 +271,7 @@ def evaluate_entry(history: List[Dict[str, Any]], cfg: MonitorConfig) -> Dict[st
         return {"entry": False, "discard": not health["alive"],
                 "reason": f"queda forte: pullback={pullback:.2f}% | health={health['score']:.2f}", "metrics": health["metrics"]}
     if not cfg.min_pullback_pct <= pullback <= cfg.max_pullback_pct:
-        momentum = evaluate_momentum(history, cfg)
+        momentum = evaluate_momentum(history, cfg, campaign_first_price, campaign_peak_price)
         return momentum if momentum.get("entry") or momentum.get("blocked") else {"entry": False, "reason": f"pullback fora da faixa: {pullback:.2f}%"}
     if current["price_usd"] < previous["price_usd"] * .998: return {"entry": False, "reason": "preco ainda caindo"}
     if current["buy_pressure"] < cfg.min_buy_pressure: return {"entry": False, "reason": "pressao compradora fraca"}
@@ -333,11 +346,29 @@ async def monitor_token(
             if pair:
                 tick = build_tick(candidate, pair)
                 if tick["price_usd"] > 0:
+                    price = tick["price_usd"]
+                    if not candidate.get("campaign_first_price_usd"):
+                        candidate["campaign_first_price_usd"] = price
+                        candidate["campaign_first_price_at_utc"] = tick["timestamp"]
+                    if price > float(candidate.get("campaign_peak_price_usd") or 0):
+                        candidate["campaign_peak_price_usd"] = price
+                        candidate["campaign_peak_price_at_utc"] = tick["timestamp"]
+                    tick.update({
+                        "campaign_first_price_usd": candidate.get("campaign_first_price_usd"),
+                        "campaign_first_price_at_utc": candidate.get("campaign_first_price_at_utc"),
+                        "campaign_peak_price_usd": candidate.get("campaign_peak_price_usd"),
+                        "campaign_peak_price_at_utc": candidate.get("campaign_peak_price_at_utc"),
+                    })
                     history.append(tick)
                     await asyncio.to_thread(_append_tick, candidate["watchlist_key"], tick)
                     if on_tick:
                         await on_tick(candidate["watchlist_key"], tick)
-                    evaluation = evaluate_entry(history, cfg)
+                    evaluation = evaluate_entry(
+                        history,
+                        cfg,
+                        candidate.get("campaign_first_price_usd"),
+                        candidate.get("campaign_peak_price_usd"),
+                    )
                     last_reason = evaluation.get("reason", "no_signal")
                     if evaluation.get("entry"):
                         signal = {**candidate, "signal_at_utc": utc_now_iso(), "signal_price_usd": tick["price_usd"],

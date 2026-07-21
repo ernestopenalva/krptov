@@ -43,6 +43,18 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(set(inference), set(ranked))
         self.assertEqual(set(monitor), {f"solana:{SOL_TOKEN}"})
 
+    def test_exhausted_solana_token_stays_social_but_skips_direct_monitor(self):
+        key = f"solana:{SOL_TOKEN}"
+        ranked = {
+            key: {
+                "chain": "solana",
+                "technical_eligibility": "blocked_exhaustion",
+                "technical_eligibility_reason": "price_change_m5_above_max",
+            }
+        }
+        self.assertIn(key, market_ranker.entries_for_circuit(ranked, self.config, "inference"))
+        self.assertNotIn(key, market_ranker.entries_for_circuit(ranked, self.config, "monitor"))
+
     def test_solana_authors_go_to_monitor_without_telegram(self):
         self.assertEqual(
             social_actions(self.config, "solana", {"authors"}),
