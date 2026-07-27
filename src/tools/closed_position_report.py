@@ -109,6 +109,13 @@ def fmt_price(value: Optional[float]) -> str:
     return f"US${integer}.{fraction}"
 
 
+def compact_entry_type(value: Any) -> str:
+    return {
+        "MOMENTUM_CONTINUATION": "MC",
+        "PULLBACK_RECOVERY": "PB",
+    }.get(str(value or "").upper(), "UNKNOWN")
+
+
 def summary(rows):
     pnls = [row["pnl_pct"] for row in rows if row["pnl_pct"] is not None]
     return (
@@ -119,11 +126,12 @@ def summary(rows):
 
 def print_table(rows):
     headers = ["ENTRADA", "PRECO ENTRADA (ONCHAIN)", "SAIDA", "PRECO SAIDA (ONCHAIN)",
-               "PNL", "PNL MIN", "PNL MAX", "EXIT", "SOCIAL", "TOKEN", "CHAIN", "CA"]
+               "PNL", "PNL MIN", "PNL MAX", "ESTRAT", "EXIT", "SOCIAL", "TOKEN", "CHAIN", "CA"]
     rendered = [[fmt_time(row["entry_time"]), fmt_price(row["entry_price_usd"]),
                  fmt_time(row["exit_time"]), fmt_price(row["exit_price_usd"]),
                  fmt_pct(row["pnl_pct"]), fmt_pct(row["min_pnl_pct"]), fmt_pct(row["max_pnl_pct"]),
-                 str(row["exit_reason"]), "SIM" if row["social"] else "NAO", row["token"],
+                 compact_entry_type(row["entry_type"]), str(row["exit_reason"]),
+                 "SIM" if row["social"] else "NAO", row["token"],
                  row["chain"], str(row["token_address"])] for row in rows]
     widths = [len(header) for header in headers]
     for values in rendered:

@@ -7,7 +7,7 @@ from src.modules import market_ranker, social_inference
 from src.modules.monitor import _select_pair
 from src.modules.chain_identity import make_watchlist_key, normalize_token_address
 from src.modules.chain_routing import circuit_enabled, load_routing_sections, social_actions
-from src.tools.closed_position_report import fmt_price, fmt_time, load_closed_positions
+from src.tools.closed_position_report import compact_entry_type, fmt_price, fmt_time, load_closed_positions
 
 
 SOL_TOKEN = "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs"
@@ -96,6 +96,11 @@ class RankerSolanaTests(unittest.TestCase):
 
 
 class ClosedPositionReportTests(unittest.TestCase):
+    def test_compacts_entry_strategy_for_report(self):
+        self.assertEqual(compact_entry_type("MOMENTUM_CONTINUATION"), "MC")
+        self.assertEqual(compact_entry_type("PULLBACK_RECOVERY"), "PB")
+        self.assertEqual(compact_entry_type(None), "UNKNOWN")
+
     def test_reads_canonical_position_closed_event(self):
         event = {
             "timestamp": "2026-07-19T12:01:00+00:00", "event": "position_closed",
