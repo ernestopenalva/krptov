@@ -123,11 +123,24 @@ def in_date_range(value: Any, from_date: Optional[date], to_date: Optional[date]
     return (from_date is None or local_date >= from_date) and (to_date is None or local_date <= to_date)
 
 
-def happened_after(event: Dict[str, Any], alert_at: Optional[datetime]) -> bool:
-    if alert_at is None:
-        return True
-    event_at = parse_time(event.get("timestamp"))
-    return event_at is None or event_at >= alert_at
+def event_effective_time(event: Dict[str, Any]) -> Optional[datetime]:
+    if event.get("event") == "position_closed":
+        position = event.get("position") or {}
+        return parse_time(position.get("entry_time"))
+    return parse_time(event.get("timestamp"))
+
+
+def causal_alert_time(event: Dict[str, Any]) -> Optional[datetime]:
+    if event.get("event") != "position_closed":
+        return None
+    position = event.get("position") or {}
+    signal = position.get("source_signal") or {}
+    snapshot = signal.get("social_alert_snapshot") or {}
+    return parse_time(
+        snapshot.get("alert_at_utc")
+        or signal.get("social_enqueued_at_utc")
+        or signal.get("social_ready_at_utc")
+    )
 
 
 def position_metrics(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -161,12 +174,6 @@ def position_metrics(event: Dict[str, Any]) -> Dict[str, Any]:
 def route_class(alert: Dict[str, Any], later_events: list[Dict[str, Any]]) -> str:
     if alert.get("monitor_admitted") is True:
         return "REDIMIDO_SOCIAL"
-    for event in later_events:
-        if event.get("event") != "position_closed":
-            continue
-        metrics = position_metrics(event)
-        if metrics["admission_source"] == "social_alert" or metrics["rank_bypass"]:
-            return "REDIMIDO_SOCIAL"
     if alert.get("monitor_admission_requested") is False:
         return "NAO_ROTEADO"
     reason = alert.get("monitor_admission_reason")
@@ -200,24 +207,58 @@ def build_rows(
     to_date: Optional[date] = None,
     only_sent: bool = False,
 ) -> list[Dict[str, Any]]:
-    indexed: Dict[str, list[Dict[str, Any]]] = defaultdict(list)
+    all_alerts = list(alerts)
+    alert_times = [parse_time(alert.get("timestamp")) for alert in all_alerts]
+    alerts_by_key: Dict[str, list[int]] = defaultdict(list)
+    for index, alert in enumerate(all_alerts):
+        key = alert_identity(alert)
+        if key and alert_times[index] is not None:
+            alerts_by_key[key].append(index)
+    for indexes in alerts_by_key.values():
+        indexes.sort(key=lambda index: alert_times[index])
+
+    assigned_events: Dict[int, list[Dict[str, Any]]] = defaultdict(list)
     for event in history:
         key = event_identity(event)
-        if key:
-            indexed[key].append(event)
+        effective_at = event_effective_time(event)
+        if not key or effective_at is None:
+            continue
+        candidates = [
+            index for index in alerts_by_key.get(key, [])
+            if alert_times[index] <= effective_at
+        ]
+        if not candidates:
+            continue
+
+        chosen = None
+        causal_at = causal_alert_time(event)
+        if causal_at is not None:
+            exact = [
+                index for index in candidates
+                if abs((alert_times[index] - causal_at).total_seconds()) < 1
+            ]
+            if exact:
+                chosen = exact[-1]
+        if chosen is None and event.get("event") == "monitor_finished":
+            admitted = [
+                index for index in candidates
+                if all_alerts[index].get("monitor_admitted") is True
+            ]
+            if admitted:
+                chosen = admitted[-1]
+        if chosen is None:
+            chosen = candidates[-1]
+        assigned_events[chosen].append(event)
 
     rows = []
-    for alert in alerts:
+    for index, alert in enumerate(all_alerts):
         if only_sent and alert.get("telegram_alert_sent") is not True:
             continue
         if not in_date_range(alert.get("timestamp"), from_date, to_date):
             continue
         key = alert_identity(alert)
         alert_at = parse_time(alert.get("timestamp"))
-        later = [
-            event for event in indexed.get(key or "", [])
-            if happened_after(event, alert_at)
-        ]
+        later = assigned_events.get(index, [])
         later.sort(key=lambda event: parse_time(event.get("timestamp")) or datetime.min.replace(tzinfo=BRASILIA))
         closed = [position_metrics(event) for event in later if event.get("event") == "position_closed"]
         pnls = [trade["pnl_pct"] for trade in closed if trade["pnl_pct"] is not None]
@@ -295,6 +336,32 @@ def compact_performance(rows: list[Dict[str, Any]]) -> str:
         f"vitorias={totals['wins']} | derrotas={totals['losses']} | "
         f"pnl_total={fmt_pct(totals['pnl_total'])} | pnl_medio={fmt_pct(totals['pnl_average'])}"
     )
+
+
+def rank_summary(rows: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    grouped: Dict[Any, list[Dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[row.get("alert_rank")].append(row)
+    result = []
+    for rank, cohort in grouped.items():
+        pnls = [row["pnl_pct"] for row in cohort if row["pnl_pct"] is not None]
+        result.append({
+            "rank": rank,
+            "alerts": len(cohort),
+            "social_redemptions": sum(row["route_class"] == "REDIMIDO_SOCIAL" for row in cohort),
+            "already_technical": sum(row["route_class"] == "JA_NO_TECNICO" for row in cohort),
+            "not_routed": sum(row["route_class"] == "NAO_ROTEADO" for row in cohort),
+            "not_admitted": sum(row["route_class"] == "NAO_ADMITIDO" for row in cohort),
+            "trades": sum(row["trades"] for row in cohort),
+            "pnl_total": sum(pnls) if pnls else None,
+        })
+    result.sort(
+        key=lambda item: (
+            safe_float(item["rank"]) is None,
+            -(safe_float(item["rank"]) or 0),
+        )
+    )
+    return result
 
 
 def print_table(rows: list[Dict[str, Any]]) -> None:
@@ -384,6 +451,16 @@ def main() -> None:
             if strategy in str(row["entry_reason"]).split(",")
         ]
         print(f"{strategy} | {compact_performance(cohort)}")
+
+    print("\n## Contagem por rank")
+    print("RANK | ALERTAS | REDIMIDOS | JA TECNICO | NAO ROTEADOS | NAO ADMITIDOS | TRADES | PNL")
+    for item in rank_summary(rows):
+        rank = item["rank"] if item["rank"] is not None else "-"
+        print(
+            f"{str(rank):>4} | {item['alerts']:>7} | {item['social_redemptions']:>9} | "
+            f"{item['already_technical']:>10} | {item['not_routed']:>12} | "
+            f"{item['not_admitted']:>13} | {item['trades']:>6} | {fmt_pct(item['pnl_total'])}"
+        )
 
     selected = rows[:args.limit] if args.limit > 0 else rows
     print(f"\n## Alertas cruzados ({len(selected)} mostrados)")
