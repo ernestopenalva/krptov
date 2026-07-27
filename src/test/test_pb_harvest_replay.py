@@ -120,11 +120,13 @@ class PbHarvestReplayTests(unittest.TestCase):
             rows = run_replays(positions, history_dir, [self.scenario(1)])
         self.assertEqual(len(positions), 1)
         self.assertEqual(len(loaded_ticks), 4)
-        self.assertAlmostEqual(rows[0]["scenarios"]["harvest_p1s"]["exit_pnl_pct"], 23)
+        self.assertAlmostEqual(rows[0]["scenarios"]["t20_lock15_gap4_p1s"]["exit_pnl_pct"], 23)
         totals = scenario_summary(rows, self.scenario(1))
         self.assertAlmostEqual(totals["actual_total"], 10)
         self.assertAlmostEqual(totals["simulated_total"], 23)
         self.assertAlmostEqual(totals["delta"], 13)
+        self.assertEqual(totals["improved"], 1)
+        self.assertEqual(totals["worsened"], 0)
 
     def test_summary_excludes_position_without_tick_history(self):
         scenario = self.scenario(1)
@@ -145,6 +147,28 @@ class PbHarvestReplayTests(unittest.TestCase):
         self.assertEqual(totals["comparable"], 0)
         self.assertEqual(totals["missing_target_history"], 1)
         self.assertIsNone(totals["simulated_total"])
+
+    def test_summary_falls_back_to_current_exit_when_harvest_does_not_close(self):
+        scenario = self.scenario(3)
+        rows = [{
+            "actual_pnl_pct": 5,
+            "actual_max_pnl_pct": 22,
+            "history_found": True,
+            "ticks": 3,
+            "scenarios": {
+                scenario.name: {
+                    "triggered": True,
+                    "closed": False,
+                    "exit_pnl_pct": None,
+                },
+            },
+        }]
+        totals = scenario_summary(rows, scenario)
+        self.assertEqual(totals["comparable"], 1)
+        self.assertEqual(totals["fallback_actual"], 1)
+        self.assertEqual(totals["actual_total"], 5)
+        self.assertEqual(totals["simulated_total"], 5)
+        self.assertEqual(totals["delta"], 0)
 
 
 if __name__ == "__main__":

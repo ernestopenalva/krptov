@@ -106,7 +106,10 @@ class HarvestScenario:
     @property
     def name(self) -> str:
         persistence = f"{self.persistence_seconds:g}"
-        return f"harvest_p{persistence}s"
+        return (
+            f"t{self.trigger_pct:g}_lock{self.lock_pct:g}_"
+            f"gap{self.trailing_gap_pct:g}_p{persistence}s"
+        )
 
 
 def replay_harvest(
@@ -205,7 +208,7 @@ def fmt_pct(value: Optional[float]) -> str:
 
 def scenario_summary(rows: list[Dict[str, Any]], scenario: HarvestScenario) -> Dict[str, Any]:
     comparable = []
-    missing_triggered = 0
+    fallback_actual = 0
     missing_target_history = 0
     for row in rows:
         actual = row["actual_pnl_pct"]
@@ -218,8 +221,7 @@ def scenario_summary(rows: list[Dict[str, Any]], scenario: HarvestScenario) -> D
         if actual is None:
             continue
         if replay["triggered"] and not replay["closed"]:
-            missing_triggered += 1
-            continue
+            fallback_actual += 1
         simulated = replay["exit_pnl_pct"] if replay["closed"] else actual
         comparable.append((actual, simulated))
     return {
@@ -227,15 +229,23 @@ def scenario_summary(rows: list[Dict[str, Any]], scenario: HarvestScenario) -> D
         "comparable": len(comparable),
         "triggered": sum(row["scenarios"][scenario.name]["triggered"] for row in rows),
         "closed": sum(row["scenarios"][scenario.name]["closed"] for row in rows),
-        "missing_triggered": missing_triggered,
+        "fallback_actual": fallback_actual,
         "missing_target_history": missing_target_history,
         "actual_total": sum(actual for actual, _ in comparable) if comparable else None,
         "simulated_total": sum(simulated for _, simulated in comparable) if comparable else None,
         "delta": sum(simulated - actual for actual, simulated in comparable) if comparable else None,
+        "improved": sum(simulated > actual + 1e-9 for actual, simulated in comparable),
+        "worsened": sum(simulated < actual - 1e-9 for actual, simulated in comparable),
+        "unchanged": sum(abs(simulated - actual) <= 1e-9 for actual, simulated in comparable),
     }
 
 
-def print_report(rows: list[Dict[str, Any]], scenarios: list[HarvestScenario]) -> None:
+def print_report(
+    rows: list[Dict[str, Any]],
+    scenarios: list[HarvestScenario],
+    *,
+    summary_only: bool = False,
+) -> None:
     print("# PB High-Profit Harvest Replay")
     print(
         f"positions={len(rows)} | historicos_encontrados={sum(row['history_found'] for row in rows)} | "
@@ -248,18 +258,23 @@ def print_report(rows: list[Dict[str, Any]], scenarios: list[HarvestScenario]) -
             f"gap={scenario.trailing_gap_pct:g}% | acionados={totals['triggered']} | "
             f"fechados_replay={totals['closed']} | comparaveis={totals['comparable']} | "
             f"pnl_atual={fmt_pct(totals['actual_total'])} | "
-            f"pnl_simulado={fmt_pct(totals['simulated_total'])} | delta={fmt_pct(totals['delta'])}"
+            f"pnl_simulado={fmt_pct(totals['simulated_total'])} | delta={fmt_pct(totals['delta'])} | "
+            f"melhoraram={totals['improved']} | pioraram={totals['worsened']} | "
+            f"iguais={totals['unchanged']}"
         )
-        if totals["missing_triggered"]:
+        if totals["fallback_actual"]:
             print(
-                f"  AVISO: {totals['missing_triggered']} Position(s) acionaram o modo, "
-                "mas nao fecharam dentro do historico disponivel."
+                f"  FALLBACK: {totals['fallback_actual']} Position(s) acionaram o modo, "
+                "mas foram encerradas primeiro pela protecao atual."
             )
         if totals["missing_target_history"]:
             print(
                 f"  AVISO: {totals['missing_target_history']} Position(s) atingiram o gatilho no resumo, "
                 "mas nao possuem ticks para replay."
             )
+
+    if summary_only:
+        return
 
     print("\n## Positions que atingiram o gatilho")
     headers = ["TOKEN", "PNL ATUAL", "PNL MAX", *[scenario.name for scenario in scenarios], "CA", "POSITION"]
@@ -274,7 +289,11 @@ def print_report(rows: list[Dict[str, Any]], scenarios: list[HarvestScenario]) -
         ]
         for scenario in scenarios:
             replay = row["scenarios"][scenario.name]
-            values.append(fmt_pct(replay["exit_pnl_pct"]) if replay["closed"] else "ABERTA")
+            values.append(
+                fmt_pct(replay["exit_pnl_pct"])
+                if replay["closed"]
+                else f"ATUAL {fmt_pct(row['actual_pnl_pct'])}"
+            )
         values.extend([str(row["token_address"]), str(row["position_id"])])
         rendered.append(values)
     widths = [len(header) for header in headers]
@@ -294,6 +313,10 @@ def parse_persistences(value: str) -> list[float]:
     return [float(item.strip()) for item in value.split(",") if item.strip()]
 
 
+def parse_numbers(value: str) -> list[float]:
+    return [float(item.strip()) for item in value.split(",") if item.strip()]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Reproduz PBs com modo de colheita, sem alterar dados ou configuracao."
@@ -302,17 +325,38 @@ def main() -> None:
     parser.add_argument("--position-history-dir", type=Path, default=DEFAULT_POSITION_HISTORY_DIR)
     parser.add_argument("--trigger-pct", type=float, default=20)
     parser.add_argument("--lock-pct", type=float, default=15)
+    parser.add_argument(
+        "--trigger-sweep",
+        help="Lista de gatilhos para comparar, por exemplo 10,15,20,25,30.",
+    )
+    parser.add_argument(
+        "--lock-distance-pct",
+        type=float,
+        default=5,
+        help="No sweep, define lock = trigger - esta distancia.",
+    )
     parser.add_argument("--trailing-gap-pct", type=float, default=4)
     parser.add_argument("--persist-seconds", default="0,1,3")
+    parser.add_argument("--summary-only", action="store_true")
     args = parser.parse_args()
 
+    triggers = (
+        parse_numbers(args.trigger_sweep)
+        if args.trigger_sweep
+        else [args.trigger_pct]
+    )
     scenarios = [
         HarvestScenario(
-            trigger_pct=args.trigger_pct,
-            lock_pct=args.lock_pct,
+            trigger_pct=trigger,
+            lock_pct=(
+                trigger - args.lock_distance_pct
+                if args.trigger_sweep
+                else args.lock_pct
+            ),
             trailing_gap_pct=args.trailing_gap_pct,
             persistence_seconds=persistence,
         )
+        for trigger in triggers
         for persistence in parse_persistences(args.persist_seconds)
     ]
     rows = run_replays(
@@ -320,7 +364,7 @@ def main() -> None:
         args.position_history_dir,
         scenarios,
     )
-    print_report(rows, scenarios)
+    print_report(rows, scenarios, summary_only=args.summary_only)
 
 
 if __name__ == "__main__":
