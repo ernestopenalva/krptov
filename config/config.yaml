@@ -6,7 +6,9 @@ system_wake_window:
 
 token_scanner_solana:
   enabled: true
-  discovery_provider: "dexscreener"
+  # PP e a fonte produtiva precoce. Dexscreener permanece somente observer.
+  # Para restaurar o fluxo anterior, use "dexscreener" e o runner em ciclos.
+  discovery_provider: "pumpportal"
   chain_id: "solana"
   allowed_dex_id: "pumpswap"
   quote_token: "SOL"
@@ -18,6 +20,18 @@ token_scanner_solana:
   emitted_retention_hours: 24
   state_file: "data/token_scanner_solana/state.json"
   audit_dir: "data/token_scanner_solana"
+  pumpportal_index_file: "data/token_scanner_solana/pumpportal_migration_index.json"
+
+  pumpportal:
+    data_url: "wss://pumpportal.fun/api/data"
+    api_key_env: "PUMPPORTAL_API_KEY"
+    reconnect_seconds: 5
+    operational_alert_interval_seconds: 300
+
+  # Nunca alimenta ranking_buffer/watchlists. Mede a visibilidade do metodo legado.
+  dexscreener_observer:
+    enabled: true
+    interval_seconds: 60
 
   # Filtros de exaustao recuperados do KRPTO3. Uma reprovação aqui bloqueia
   # somente a admissao tecnica direta; o token continua elegivel ao social.

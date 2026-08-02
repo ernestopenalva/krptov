@@ -47,7 +47,7 @@ while true; do
 
     log "Iniciando ciclo de descoberta Solana"
     set +e
-    "${PYTHON_BIN}" -u -m src.modules.token_scanner_solana 2>&1 | tee -a "${SESSION_LOG}"
+    "${PYTHON_BIN}" -u -m src.modules.token_scanner_solana --run-forever 2>&1 | tee -a "${SESSION_LOG}"
     scanner_status="${PIPESTATUS[0]}"
     set -e
 

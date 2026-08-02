@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import time
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import requests
+import websockets
 import yaml
 from dotenv import load_dotenv
 
@@ -22,6 +24,7 @@ from src.modules.runtime_ops import RuntimeOpsAlerter
 SCANNER_VERSION = "krptov-token-scanner-solana-v1"
 DEXSCREENER_PROFILES_URL = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEXSCREENER_TOKENS_URL = "https://api.dexscreener.com/tokens/v1/{chain}/{addresses}"
+PUMPPORTAL_DATA_URL = "wss://pumpportal.fun/api/data"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
@@ -70,6 +73,9 @@ def load_config(path: Path = CONFIG_FILE) -> Dict[str, Any]:
     )
     config["audit_dir"] = configured_path(
         scanner.get("audit_dir"), DATA_DIR / "token_scanner_solana"
+    )
+    config["pumpportal_index_file"] = configured_path(
+        scanner.get("pumpportal_index_file"), DATA_DIR / "token_scanner_solana" / "pumpportal_migration_index.json"
     )
     return config
 
@@ -181,6 +187,15 @@ def build_discovery_provider(config: Dict[str, Any], session: requests.Session):
     )
 
 
+def build_dexscreener_provider(config: Dict[str, Any], session: requests.Session):
+    """The Dex provider is also used by the observer, regardless of primary source."""
+    return DexscreenerDiscoveryProvider(
+        session,
+        float(config.get("request_timeout_seconds") or 20),
+        float(config.get("rate_limit_backoff_seconds") or 10),
+    )
+
+
 def pair_token(pair: Dict[str, Any], side: str) -> Dict[str, Any]:
     value = pair.get(side)
     return value if isinstance(value, dict) else {}
@@ -241,6 +256,21 @@ def technical_eligibility(
             "price_change_h1": h1,
             "max_price_change_m5": max_m5,
             "max_price_change_h1": max_h1,
+        },
+    }
+
+
+def technical_not_evaluated(observed_at: str) -> Dict[str, Any]:
+    """Do not turn missing early-source market history into a synthetic approval."""
+    return {
+        "technical_eligibility": "not_evaluated_early_source",
+        "technical_eligibility_reason": "pumpportal_migration_has_no_m5_h1_snapshot",
+        "technical_eligibility_updated_at_utc": observed_at,
+        "technical_filter_snapshot": {
+            "price_change_m5": None,
+            "price_change_h1": None,
+            "max_price_change_m5": None,
+            "max_price_change_h1": None,
         },
     }
 
@@ -410,6 +440,69 @@ def build_buffer_entry(
     }
 
 
+def pumpportal_value(event: Dict[str, Any], *names: str) -> Any:
+    for name in names:
+        value = event.get(name)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def allowed_pumpportal_migration(event: Dict[str, Any]) -> bool:
+    """Keep the Solana universe to PumpSwap even if the provider expands migrations."""
+    venue = str(pumpportal_value(event, "pool", "poolType", "dex", "dexId") or "").lower()
+    return "raydium" not in venue and "bonk" not in venue
+
+
+def build_pumpportal_buffer_entry(
+    event: Dict[str, Any], jupiter: Dict[str, Any], config: Dict[str, Any], observed_at: str
+) -> Dict[str, Any]:
+    """Normalize a migration event without inventing Dexscreener market history."""
+    token_address = normalize_solana_address(pumpportal_value(event, "mint", "tokenAddress", "token_address"))
+    if not token_address:
+        raise ValueError("PumpPortal migration sem mint")
+    chain = str(config.get("chain_id") or "solana")
+    pool_address = normalize_solana_address(pumpportal_value(event, "pool", "poolAddress", "pairAddress"))
+    quote = normalize_solana_address(pumpportal_value(event, "quoteMint", "quote_mint"))
+    return {
+        "watchlist_key": make_watchlist_key(chain, token_address),
+        "chain": chain,
+        "chain_id": chain,
+        "token_address": token_address,
+        "token_symbol": pumpportal_value(event, "symbol"),
+        "token_name": pumpportal_value(event, "name"),
+        "pool_address": pool_address,
+        "pair_address": pool_address,
+        "base_mint": token_address,
+        "quote_mint": quote or config.get("quote_token_address"),
+        "quote_token": config.get("quote_token") or "SOL",
+        "quote_token_address": config.get("quote_token_address"),
+        "source": "pumpswap",
+        "source_type": "token_discovered",
+        "discovery_provider": "pumpportal",
+        "discovery_event_type": "migration",
+        "discovery_event_signature": pumpportal_value(event, "signature", "txSignature", "transactionSignature"),
+        "discovery_event_received_at_utc": observed_at,
+        "dex_id": "pumpswap",
+        "discovered_at_utc": observed_at,
+        "created_at_utc": observed_at,
+        "last_seen_at_utc": observed_at,
+        "times_seen": 1,
+        "status": "novo", "social_status": "pendente", "monitor_status": "pendente",
+        "telegram_alert_sent": False, "discarded_reason": None,
+        "scanner_validation_status": "approved",
+        "scanner_validation_reason": "pumpportal_migration",
+        **technical_not_evaluated(observed_at),
+        "ranking_status": "pending_dexscreener",
+        "ranking_first_seen_at_utc": observed_at,
+        "ranking_last_seen_at_utc": observed_at,
+        "ranking_attempts": 0,
+        "discovery_profile": {"provider_event": event},
+        "discovery_market_snapshot": {},
+        "jupiter_observation": jupiter["summary"],
+    }
+
+
 def current_known_keys() -> set:
     known = set()
     for path in (RANKING_BUFFER_FILE, WATCHLIST_FILE, MONITOR_WATCHLIST_FILE):
@@ -546,20 +639,155 @@ def run_scanner_cycle(
     }
 
 
+def process_pumpportal_migration(
+    event: Dict[str, Any], config: Dict[str, Any], session: Optional[requests.Session] = None,
+    dry_run: bool = False, current_time: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Admit one PumpPortal migration. This is the sole PP -> buffer boundary."""
+    current_time = current_time or utc_now()
+    observed_at = to_iso(current_time)
+    if not allowed_pumpportal_migration(event):
+        return {"action": "ignored_non_pumpswap_migration"}
+    session = session or requests
+    jupiter = observe_jupiter(
+        normalize_solana_address(pumpportal_value(event, "mint", "tokenAddress", "token_address")) or "",
+        config, session, observed_at,
+    )
+    entry = build_pumpportal_buffer_entry(event, jupiter, config, observed_at)
+    action = "dry_run" if dry_run else admit_to_buffer(entry)
+    if not dry_run:
+        index_path = config.get("pumpportal_index_file") or config["audit_dir"] / "pumpportal_migration_index.json"
+        index = load_json_dict(index_path)
+        index.setdefault(entry["token_address"], {
+            "first_received_at_utc": observed_at,
+            "pool_address": entry.get("pool_address"),
+            "signature": entry.get("discovery_event_signature"),
+        })
+        atomic_save_json(index_path, index)
+        append_jsonl(config["audit_dir"] / f"pumpportal_migrations_{current_time:%Y-%m-%d}.jsonl", {
+            "timestamp": observed_at, "scanner_version": SCANNER_VERSION,
+            "action": action, "event": event, "watchlist_key": entry["watchlist_key"],
+            "jupiter": jupiter,
+        })
+    return {"action": action, "watchlist_key": entry["watchlist_key"], "jupiter_available": jupiter["summary"].get("available")}
+
+
+def run_dexscreener_observer_cycle(
+    config: Dict[str, Any], provider=None, current_time: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Record what the legacy DS scanner could see; deliberately never writes the buffer."""
+    current_time = current_time or utc_now()
+    observed_at = to_iso(current_time)
+    provider = provider or build_dexscreener_provider(config, requests)
+    profiles = provider.latest_profiles()
+    candidates = []
+    chain = str(config.get("chain_id") or "solana")
+    for profile in profiles:
+        address = normalize_solana_address(profile.get("tokenAddress"))
+        if str(profile.get("chainId") or "").lower() != chain or not address:
+            continue
+        if config.get("require_pump_mint_suffix", True) and not address.lower().endswith("pump"):
+            continue
+        item = dict(profile); item["tokenAddress"] = address
+        candidates.append(item)
+    pairs = provider.pairs_for_tokens(chain, [item["tokenAddress"] for item in candidates]) if candidates else []
+    index_path = config.get("pumpportal_index_file") or config["audit_dir"] / "pumpportal_migration_index.json"
+    pp_index = load_json_dict(index_path)
+    observed = 0
+    audit_path = config["audit_dir"] / f"dexscreener_observations_{current_time:%Y-%m-%d}.jsonl"
+    for profile in candidates:
+        address = profile["tokenAddress"]
+        pair = select_pumpswap_pair(pairs, address, config)
+        pp_observation = pp_index.get(address) or {}
+        pp_at = parse_iso(pp_observation.get("first_received_at_utc"))
+        lead_seconds = None if pp_at is None else round((current_time - pp_at).total_seconds(), 3)
+        append_jsonl(audit_path, {
+            "timestamp": observed_at, "scanner_version": SCANNER_VERSION,
+            "observer_only": True, "discovery_provider": "dexscreener",
+            "token_address": address, "watchlist_key": make_watchlist_key(chain, address),
+            "profile": profile, "selected_pair": pair,
+            "would_be_captured": pair is not None,
+            "pumpportal_first_received_at_utc": pp_observation.get("first_received_at_utc"),
+            "pumpportal_to_dexscreener_seconds": lead_seconds,
+        })
+        observed += 1
+    return {"profiles": len(profiles), "candidates": len(candidates), "would_capture": sum(1 for p in candidates if select_pumpswap_pair(pairs, p["tokenAddress"], config)), "observed": observed}
+
+
+def pumpportal_url(config: Dict[str, Any]) -> str:
+    pp = config.get("pumpportal") or {}
+    url = str(pp.get("data_url") or PUMPPORTAL_DATA_URL)
+    key = os.getenv(str(pp.get("api_key_env") or "PUMPPORTAL_API_KEY"))
+    if not key:
+        raise ValueError(f"Defina a chave PumpPortal em {pp.get('api_key_env') or 'PUMPPORTAL_API_KEY'}.")
+    return f"{url}?api-key={key}"
+
+
+async def run_pumpportal_worker(config: Dict[str, Any], dry_run: bool = False) -> None:
+    """Long-running PP migration worker; DS observation is non-blocking audit work."""
+    pp = config.get("pumpportal") or {}
+    reconnect_seconds = float(pp.get("reconnect_seconds") or 5)
+    alert_after_seconds = float(pp.get("operational_alert_interval_seconds") or 300)
+    observer_seconds = float((config.get("dexscreener_observer") or {}).get("interval_seconds") or 60)
+    next_observer = 0.0
+    last_alert_at = 0.0
+    while True:
+        try:
+            async with websockets.connect(pumpportal_url(config), ping_interval=20, ping_timeout=20) as websocket:
+                await websocket.send(json.dumps({"method": "subscribeMigration"}))
+                print("[PUMPPORTAL] Assinado em subscribeMigration.", flush=True)
+                while True:
+                    now = time.monotonic()
+                    if (config.get("dexscreener_observer") or {}).get("enabled", True) and now >= next_observer:
+                        summary = await asyncio.to_thread(run_dexscreener_observer_cycle, config)
+                        print(f"[DEXSCREENER_OBSERVER] {summary}", flush=True)
+                        next_observer = now + observer_seconds
+                    try:
+                        payload = json.loads(await asyncio.wait_for(websocket.recv(), timeout=1))
+                    except asyncio.TimeoutError:
+                        continue
+                    if not isinstance(payload, dict) or not pumpportal_value(payload, "mint", "tokenAddress", "token_address"):
+                        continue
+                    if not allowed_pumpportal_migration(payload):
+                        print("[PUMPPORTAL] Migracao fora de PumpSwap ignorada.", flush=True)
+                        continue
+                    result = await asyncio.to_thread(process_pumpportal_migration, payload, config, None, dry_run)
+                    print(f"[PUMPPORTAL] migration {result}", flush=True)
+        except Exception as error:
+            print(f"[PUMPPORTAL][ERRO] {type(error).__name__}: {error}; reconectando em {reconnect_seconds:g}s", flush=True)
+            now = time.monotonic()
+            if now - last_alert_at >= alert_after_seconds:
+                last_alert_at = now
+                await asyncio.to_thread(
+                    RuntimeOpsAlerter(config.get("_root_config") or {}).send,
+                    "token_scanner_solana", "pumpportal", f"{type(error).__name__}: {error}",
+                )
+            await asyncio.sleep(reconnect_seconds)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Descobre tokens Solana graduados no PumpSwap.")
     parser.add_argument("--config", type=Path, default=CONFIG_FILE)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--run-forever", action="store_true", help="Mantem o stream PumpPortal conectado.")
     return parser.parse_args()
 
 
-def run_token_scanner_solana(config_path: Path = CONFIG_FILE, dry_run: bool = False) -> Dict[str, Any]:
+def run_token_scanner_solana(
+    config_path: Path = CONFIG_FILE, dry_run: bool = False, run_forever: bool = False,
+) -> Dict[str, Any]:
     load_dotenv(PROJECT_ROOT / ".env")
     config = load_config(config_path)
     if not config.get("enabled", True):
         print("Token Scanner Solana desabilitado.", flush=True)
         return {"disabled": True}
-    print(f"=== KRPTO-V | Token Scanner Solana | {SCANNER_VERSION} ===", flush=True)
+    provider_name = str(config.get("discovery_provider") or "dexscreener").lower()
+    print(f"=== KRPTO-V | Token Scanner Solana | {SCANNER_VERSION} | {provider_name} ===", flush=True)
+    if provider_name == "pumpportal":
+        if not run_forever:
+            raise ValueError("PumpPortal exige --run-forever para nao perder eventos ao vivo.")
+        asyncio.run(run_pumpportal_worker(config, dry_run=dry_run))
+        return {"running": True, "provider": provider_name}
     summary = run_scanner_cycle(config, dry_run=dry_run)
     print(
         "Ciclo concluido | " + " | ".join(f"{key}={value}" for key, value in summary.items()),
@@ -571,7 +799,7 @@ def run_token_scanner_solana(config_path: Path = CONFIG_FILE, dry_run: bool = Fa
 def main() -> None:
     args = parse_args()
     try:
-        run_token_scanner_solana(args.config, args.dry_run)
+        run_token_scanner_solana(args.config, args.dry_run, args.run_forever)
     except Exception as error:
         print(f"[ERRO][TOKEN_SCANNER_SOLANA] {type(error).__name__}: {error}", flush=True)
         try:

@@ -173,6 +173,46 @@ class TokenScannerSolanaTests(unittest.TestCase):
             self.assertEqual(waiting["waiting_pumpswap"], 1)
             self.assertEqual(emitted["emitted"], 1)
 
+    def test_dexscreener_observer_never_writes_ranking_buffer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.runtime_patches(root):
+                result = scanner.run_dexscreener_observer_cycle(
+                    config(root), provider=FakeProvider([pair()]),
+                    current_time=datetime(2026, 7, 20, 12, tzinfo=timezone.utc),
+                )
+            audit = (root / "scanner" / "dexscreener_observations_2026-07-20.jsonl")
+            self.assertEqual(result["would_capture"], 1)
+            self.assertTrue(audit.exists())
+            self.assertFalse((root / "ranking_buffer.json").exists())
+            self.assertFalse((root / "watchlist.json").exists())
+
+    def test_pumpportal_migration_admits_without_dex_market_filters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event = {"mint": TOKEN, "pool": POOL, "signature": "sig", "symbol": "MEOW"}
+            with self.runtime_patches(root), patch.object(
+                scanner, "observe_jupiter", return_value=unavailable_jupiter("2026-07-20T12:00:00Z")
+            ):
+                result = scanner.process_pumpportal_migration(
+                    event, config(root), current_time=datetime(2026, 7, 20, 12, tzinfo=timezone.utc),
+                )
+            buffer = json.loads((root / "ranking_buffer.json").read_text(encoding="utf-8"))
+            entry = buffer[f"solana:{TOKEN}"]
+            self.assertEqual(result["action"], "created")
+            self.assertEqual(entry["discovery_provider"], "pumpportal")
+            self.assertEqual(entry["technical_eligibility"], "not_evaluated_early_source")
+            self.assertEqual(entry["discovery_event_signature"], "sig")
+
+    def test_pumpportal_raydium_migration_is_not_admitted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event = {"mint": TOKEN, "pool": "raydium"}
+            with self.runtime_patches(root):
+                result = scanner.process_pumpportal_migration(event, config(root))
+            self.assertEqual(result["action"], "ignored_non_pumpswap_migration")
+            self.assertFalse((root / "ranking_buffer.json").exists())
+
     def test_pool_scanner_configuration_contains_only_evm_chains(self):
         raw = yaml.safe_load((pool_scanner.PROJECT_ROOT / "config" / "pool_sources.yaml").read_text())
         self.assertNotIn("solana", raw["chains"])
