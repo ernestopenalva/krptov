@@ -29,3 +29,10 @@ validacao=entradas PumpPortal com endereco=89; entradas Base antigas sem enderec
 evento=Watchlist Ranking passou a exibir CAs Solana completos com 44 caracteres na tabela ampla
 arquivos=src/tools/watchlist_ranking.py,src/test/test_watchlist_ranking.py
 validacao=14 testes da ferramenta aprovados; teste dedicado confirma que o CA Solana nao e truncado
+
+## 2026-08-03T14:39:11-03:00
+
+evento=Controle de capacidade adicionado exclusivamente para Position Solana; novas entradas sao adiadas quando houver cinco posicoes Solana abertas, sem restringir descoberta, ranking, inferencia social ou monitoramento e sem afetar redes EVM
+arquivos=src/modules/position.py,config/config.yaml,src/test/test_monitor_position_runtime.py
+configuracao=position.max_active_positions_by_chain.solana=5
+observabilidade=status do Scheduler passa a expor capacidade e contagem por chain; primeira recusa de cada token durante saturacao fica registrada como position_capacity_reached

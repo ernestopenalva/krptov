@@ -231,6 +231,10 @@ monitor:
 position:
   enabled: true
   mode: "paper"
+  # Limita apenas execucao/uso de RPC; descoberta e monitoramento continuam abertos.
+  # Redes ausentes deste mapa permanecem sem limite de posicoes.
+  max_active_positions_by_chain:
+    solana: 5
   poll_interval_seconds: 1
   timeout_seconds: 15
   entry_tick_wait_seconds: 30

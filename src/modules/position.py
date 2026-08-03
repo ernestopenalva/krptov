@@ -53,9 +53,16 @@ class PositionSupervisor:
         self.poll_seconds = float(self.raw_config.get("poll_interval_seconds", 1))
         self.entry_tick_wait_seconds = float(self.raw_config.get("entry_tick_wait_seconds", 30))
         self.max_entry_divergence_pct = float(self.raw_config.get("max_entry_divergence_pct", 10))
+        raw_capacity = self.raw_config.get("max_active_positions_by_chain") or {}
+        self.max_active_positions_by_chain = {
+            str(chain).strip().lower(): int(limit)
+            for chain, limit in raw_capacity.items()
+            if int(limit) > 0
+        }
         self.tasks: Dict[str, asyncio.Task] = {}
         self.states: Dict[str, PositionState] = {}
         self.last_ticks: Dict[str, Dict[str, Any]] = {}
+        self.capacity_rejections: set[str] = set()
         self.stop_event = asyncio.Event()
 
     def start_fresh_paper_session(self) -> int:
@@ -82,6 +89,8 @@ class PositionSupervisor:
 
     async def open_position(self, signal: Dict[str, Any]) -> Optional[str]:
         if not self.enabled or self.stop_event.is_set(): return None
+        if not self._has_capacity(signal, record_rejection=True):
+            return None
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.entry_tick_wait_seconds
         tick = None
@@ -113,6 +122,10 @@ class PositionSupervisor:
                           "limit_pct": self.max_entry_divergence_pct, "signal": signal, "tick": payload})
             print(f"[POSITION][WARN] entrada rejeitada por divergencia {divergence:.2f}%", flush=True)
             return None
+        # Another monitor may have occupied the last slot while this entry tick
+        # was being fetched. Recheck immediately before creating the position.
+        if not self._has_capacity(signal, record_rejection=True):
+            return None
         position_id = f"pos-{uuid.uuid4().hex[:12]}"
         state = self.engine.open(position_id=position_id, signal=signal, tick=payload)
         self.states[position_id] = state
@@ -121,6 +134,35 @@ class PositionSupervisor:
         self.tasks[position_id] = asyncio.create_task(self._run(position_id), name=position_id)
         print(f"[POSITION][OPEN] {position_id} | {state.watchlist_key} | entry={state.entry_price_usd}", flush=True)
         return position_id
+
+    def _has_capacity(self, signal: Dict[str, Any], record_rejection: bool = False) -> bool:
+        chain = str(signal.get("chain") or signal.get("chain_id") or "").strip().lower()
+        limit = self.max_active_positions_by_chain.get(chain)
+        if not limit:
+            return True
+        active = sum(1 for state in self.states.values() if str(state.chain).lower() == chain)
+        watchlist_key = str(signal.get("watchlist_key") or f"{chain}:unknown")
+        if active < limit:
+            self.capacity_rejections.discard(watchlist_key)
+            return True
+        if record_rejection and watchlist_key not in self.capacity_rejections:
+            self.capacity_rejections.add(watchlist_key)
+            _append_jsonl(TRADING_HISTORY_FILE, {
+                "timestamp": _now(),
+                "event": "entry_rejected",
+                "reason": "position_capacity_reached",
+                "chain": chain,
+                "active_positions_chain": active,
+                "limit": limit,
+                "watchlist_key": watchlist_key,
+                "signal": signal,
+            })
+            print(
+                f"[POSITION][CAPACITY] entrada adiada {watchlist_key} | "
+                f"chain={chain} | ativas={active}/{limit}",
+                flush=True,
+            )
+        return False
 
     async def _run(self, position_id: str) -> None:
         state = self.states[position_id]
@@ -194,7 +236,13 @@ class PositionSupervisor:
         self.states.clear(); self.last_ticks.clear()
 
     def status(self) -> Dict[str, Any]:
+        active_by_chain: Dict[str, int] = {}
+        for state in self.states.values():
+            chain = str(state.chain).lower()
+            active_by_chain[chain] = active_by_chain.get(chain, 0) + 1
         return {"active_positions": len(self.states),
+                "active_positions_by_chain": active_by_chain,
+                "position_capacity_by_chain": self.max_active_positions_by_chain,
                 "positions": [{"position_id": key, "watchlist_key": state.watchlist_key,
                                "symbol": state.symbol, "chain": state.chain,
                                "entry_price_usd": state.entry_price_usd,

@@ -91,6 +91,31 @@ def market_tick(status="ok", price=100, reason=None):
 
 
 class PositionSupervisorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_capacity_limit_applies_only_to_configured_chain(self):
+        config = {"position": {"mode": "paper", "entry_tick_wait_seconds": .1,
+                               "poll_interval_seconds": .01,
+                               "max_active_positions_by_chain": {"solana": 1}}}
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            position_module, "TRADING_HISTORY_FILE", Path(directory) / "history.jsonl"
+        ), patch.object(position_module, "LIVE_DIR", Path(directory) / "live"), patch.object(
+            position_module, "HISTORY_DIR", Path(directory) / "position-history"
+        ):
+            supervisor = PositionSupervisor(config, registry=FakeRegistry([market_tick(price=100)]))
+            solana_signal = {**signal(), "watchlist_key": "solana:mint-1", "chain": "solana"}
+            first_position = await supervisor.open_position(solana_signal)
+            self.assertIsNotNone(first_position)
+
+            second_signal = {**solana_signal, "watchlist_key": "solana:mint-2"}
+            self.assertIsNone(await supervisor.open_position(second_signal))
+
+            evm_position = await supervisor.open_position(signal())
+            self.assertIsNotNone(evm_position)
+            self.assertEqual(supervisor.status()["active_positions_by_chain"], {"solana": 1, "base": 1})
+            self.assertEqual(supervisor.status()["position_capacity_by_chain"], {"solana": 1})
+            history = (Path(directory) / "history.jsonl").read_text(encoding="utf-8")
+            self.assertIn("position_capacity_reached", history)
+            await supervisor.stop_now()
+
     async def test_waits_for_first_reliable_onchain_tick(self):
         config = {"position": {"mode": "paper", "entry_tick_wait_seconds": .2,
                                "poll_interval_seconds": .01, "max_entry_divergence_pct": 10}}
