@@ -17,3 +17,9 @@ validacao=commit 36b5c3c; posteriormente dois eventos PumpPortal foram admitidos
 evento=Solana liberada do bloqueio social por quote_liquidity; ranker passa a propagar pair_address e pool_address selecionados pela Dexscreener; blacklist social unificada com escopo query/local
 arquivos=src/modules/social_inference.py,src/modules/market_ranker.py,config/social_author_blacklist.txt
 validacao=25 testes de inferencia social e market ranker aprovados
+
+## 2026-08-03T01:44:44-03:00
+
+evento=Scheduler passou a ignorar candidatos de monitor sem pair_address/pool_address; seis entradas Base antigas identificadas para arquivamento controlado
+arquivos=src/modules/scheduler.py,data/watchlist.json,data/watchlist_archive.jsonl
+validacao=entradas PumpPortal com endereco=89; entradas Base antigas sem endereco=6

@@ -127,6 +127,20 @@ class Scheduler:
                                                max_social=self.max_social, max_attempts=self.max_attempts)
             if not reserved: return
             key, candidate = reserved
+            if not candidate.get("pair_address") and not candidate.get("pool_address"):
+                mutate_entry(
+                    key,
+                    {
+                        "monitor_status": "completed",
+                        "monitor_finished_at_utc": _now(),
+                        "monitor_last_reason": "missing_pool_address",
+                    },
+                )
+                print(
+                    f"[SCHEDULER][SKIP] ignorado {key} | motivo=missing_pool_address",
+                    flush=True,
+                )
+                continue
             attempt_id = f"mon-{uuid.uuid4().hex[:12]}"
             candidate["monitor_attempt_id"] = attempt_id
             stop_event = asyncio.Event()
