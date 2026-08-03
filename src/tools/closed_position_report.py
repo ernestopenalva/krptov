@@ -82,6 +82,35 @@ def parse_time(value: Any) -> Optional[datetime]:
     return parsed.astimezone(BRASILIA)
 
 
+def parse_boundary(value: Optional[str], *, end_of_day: bool = False) -> Optional[datetime]:
+    """Parse the same boundary forms used by KRPTO3's report."""
+    if not value:
+        return None
+    parsed = parse_time(value)
+    if parsed is None:
+        for format_string in ("%d/%m", "%d/%m %H:%M", "%d/%m %H:%M:%S"):
+            try:
+                short_date = datetime.strptime(value, format_string)
+            except ValueError:
+                continue
+            parsed = short_date.replace(year=datetime.now(BRASILIA).year, tzinfo=BRASILIA)
+            break
+    if parsed is None:
+        raise SystemExit(
+            f"data invalida: {value}. Use YYYY-MM-DD, ISO ou DD/MM [HH:MM[:SS]]."
+        )
+    if end_of_day and len(value) in (5, 10):
+        return parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return parsed
+
+
+def in_period(row: Dict[str, Any], since: Optional[datetime], until: Optional[datetime]) -> bool:
+    exited = parse_time(row.get("exit_time"))
+    if exited is None:
+        return False
+    return (since is None or exited >= since) and (until is None or exited <= until)
+
+
 def fmt_time(value: Any) -> str:
     parsed = parse_time(value)
     return parsed.strftime("%d/%m %H:%M:%S") if parsed else "-"
@@ -147,10 +176,14 @@ def print_table(rows):
 def main():
     parser = argparse.ArgumentParser(description="Lista Positions fechadas do KRPTO-V.")
     parser.add_argument("--file", type=Path, default=DEFAULT_HISTORY_FILE)
+    parser.add_argument("--since", help="Inicio em YYYY-MM-DD, ISO ou DD/MM [HH:MM[:SS]]; filtro pela saida.")
+    parser.add_argument("--until", help="Fim em YYYY-MM-DD, ISO ou DD/MM [HH:MM[:SS]]; filtro pela saida.")
     parser.add_argument("--chain", help="Exibe somente uma chain (ethereum, base, bsc, robinhood ou solana).")
     parser.add_argument("--limit", type=int, default=0, help="0 mostra todos; valor positivo mostra os mais recentes.")
     args = parser.parse_args()
-    rows = list(load_closed_positions(args.file) or [])
+    since = parse_boundary(args.since)
+    until = parse_boundary(args.until, end_of_day=True)
+    rows = [row for row in (load_closed_positions(args.file) or []) if in_period(row, since, until)]
     if args.chain:
         rows = [row for row in rows if row["chain"] == args.chain.lower()]
     rows.sort(

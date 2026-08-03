@@ -8,6 +8,7 @@ __pycache__/
 # logs
 logs/*
 !logs/.gitkeep
+!logs/runtime_change_history.txt
 
 # dados gerados
 data/*.json
