@@ -130,6 +130,8 @@ class MarketRankerBatchTests(unittest.TestCase):
             updated = json.loads(watchlist_file.read_text(encoding="utf-8"))
             self.assertEqual(updated[key_a]["token_symbol"], "TEST")
             self.assertEqual(updated[key_a]["token_name"], "Test Token")
+            self.assertEqual(updated[key_a]["pair_address"], "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            self.assertEqual(updated[key_a]["pool_address"], "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
             self.assertEqual(updated[key_a]["liquidity_usd"], 5000)
             self.assertEqual(updated[key_a]["volume_h24"], 1000)
             self.assertEqual(updated[key_a]["txns_h24"], 20)

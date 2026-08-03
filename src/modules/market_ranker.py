@@ -1807,6 +1807,17 @@ def run_cycle(dry_run=False, session=requests):
                     "minimum_token_age_inferred_source": social_eligibility["minimum_token_age_inferred_source"],
                 }
             )
+            selected_pair_address = selected_pair.get("pairAddress") if selected_pair else None
+            if selected_pair_address:
+                # Dexscreener's pairAddress is the usable pool/pair identity
+                # for monitor and position. PumpPortal may only provide a venue
+                # label (for example, "pump-amm") at discovery time.
+                updates_by_key[token["watchlist_key"]].update(
+                    {
+                        "pair_address": selected_pair_address,
+                        "pool_address": selected_pair_address,
+                    }
+                )
             if market_score is not None:
                 updates_by_key[token["watchlist_key"]]["market_score"] = market_score
                 updates_by_key[token["watchlist_key"]].update(metrics or {})

@@ -179,6 +179,48 @@ class SocialEligibilityTests(unittest.TestCase):
             social_inference.social_query_skip_reason(base_entry, config, current_time=current_time)
         )
 
+    def test_solana_is_not_blocked_by_quote_liquidity(self):
+        config = {**social_inference.DEFAULT_CONFIG, "min_quote_liquidity_usd": 1}
+        entry = {
+            "chain_id": "solana",
+            "status": "novo",
+            "social_eligibility": "eligible",
+            "market_score": 50,
+            "quote_liquidity_usd": None,
+        }
+        self.assertIsNone(
+            social_inference.social_query_skip_reason(
+                entry,
+                config,
+                chain_id="solana",
+            )
+        )
+
+    def test_blacklist_scope_limits_query_but_keeps_full_local_list(self):
+        config = {
+            **social_inference.DEFAULT_CONFIG,
+            "query_excluded_author_usernames": ["bitecong", "bitecong", "local_only"],
+            "excluded_author_usernames": ["bitecong", "local_only", "another_local"],
+        }
+        query = social_inference.build_x_query("A" * 44, config)
+        self.assertIn("-from:bitecong", query)
+        self.assertIn("-from:local_only", query)
+        self.assertLessEqual(len(query), 512)
+        self.assertEqual(
+            social_inference.build_social_analysis(
+                {
+                    "data": [{"id": "1", "author_id": "a"}],
+                    "includes": {
+                        "users": [
+                            {"id": "a", "username": "another_local", "public_metrics": {"followers_count": 100000}},
+                        ]
+                    },
+                },
+                config,
+            )["posts_found"],
+            0,
+        )
+
     def test_social_usage_counts_unique_posts_for_budget(self):
         current_time = datetime(2026, 6, 12, 12, 0, 0)
         usage = {

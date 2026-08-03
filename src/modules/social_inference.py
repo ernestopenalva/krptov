@@ -97,6 +97,7 @@ DEFAULT_CONFIG = {
     "excluded_author_usernames": [
         "dexsignals",
     ],
+    "query_excluded_author_usernames": [],
     "automated_author_usernames": [
         "bankrscanner",
     ],
@@ -351,19 +352,39 @@ def load_simple_yaml_social_inference(config_file):
     return load_simple_yaml_sections(config_file, {"social_inference"}).get("social_inference", {})
 
 
-def load_username_file(path=SOCIAL_BLACKLIST_FILE):
+def load_blacklist_entries(path=SOCIAL_BLACKLIST_FILE):
     if not Path(path).exists():
         return []
 
-    usernames = []
+    entries = []
     for raw_line in Path(path).read_text(encoding="utf-8").splitlines():
         line = raw_line.split("#", 1)[0].strip()
         if not line:
             continue
-        username = normalize_username(line)
+        parts = [part.strip() for part in line.split("|", 1)]
+        username = normalize_username(parts[0])
         if username:
-            usernames.append(username)
-    return usernames
+            scope = parts[1].lower() if len(parts) > 1 else "query"
+            if scope not in {"query", "local"}:
+                scope = "query"
+            entries.append({"username": username, "scope": scope})
+    return entries
+
+
+def load_username_file(path=SOCIAL_BLACKLIST_FILE):
+    return [entry["username"] for entry in load_blacklist_entries(path)]
+
+
+def dedupe_usernames(values):
+    result = []
+    seen = set()
+    for value in values or []:
+        username = normalize_username(value)
+        if not username or username.lower() in seen:
+            continue
+        seen.add(username.lower())
+        result.append(username)
+    return result
 
 
 def load_config(config_file=CONFIG_FILE):
@@ -386,21 +407,15 @@ def load_config(config_file=CONFIG_FILE):
         loaded_sections.get("telegram_alerts", {}),
     )
     config.update(load_routing_sections(Path(config_file)))
-    external_blacklist = load_username_file()
-    if external_blacklist:
-        combined = list(config.get("excluded_author_usernames", []) or []) + external_blacklist
-        deduped = []
-        seen = set()
-        for username in combined:
-            normalized = normalize_username(username)
-            if not normalized:
-                continue
-            lowered = normalized.lower()
-            if lowered in seen:
-                continue
-            seen.add(lowered)
-            deduped.append(normalized)
-        config["excluded_author_usernames"] = deduped
+    blacklist_entries = load_blacklist_entries()
+    config["excluded_author_usernames"] = dedupe_usernames(
+        list(config.get("excluded_author_usernames", []) or [])
+        + [entry["username"] for entry in blacklist_entries]
+    )
+    config["query_excluded_author_usernames"] = dedupe_usernames(
+        list(config.get("query_excluded_author_usernames", []) or [])
+        + [entry["username"] for entry in blacklist_entries if entry["scope"] == "query"]
+    )
     return config
 
 
@@ -670,7 +685,7 @@ def is_monitoring_active(entry):
     return entry.get("status") == STATUS_ATIVO or entry.get("social_status") == SOCIAL_STATUS_ATIVO
 
 
-def social_query_skip_reason(entry, config, current_time=None):
+def social_query_skip_reason(entry, config, current_time=None, chain_id=None):
     required_eligibility = config.get("require_social_eligibility")
     monitoring_active = is_monitoring_active(entry)
     # Once social monitoring has started, finish the short observation window
@@ -685,6 +700,8 @@ def social_query_skip_reason(entry, config, current_time=None):
             return SOCIAL_SKIP_REASON_MISSING_MARKET_SCORE
 
     min_quote_liquidity = numeric_or_none(config.get("min_quote_liquidity_usd"))
+    if str(chain_id or entry.get("chain_id") or entry.get("chain") or "").lower() == "solana":
+        min_quote_liquidity = None
     if min_quote_liquidity is not None and min_quote_liquidity > 0:
         quote_liquidity = numeric_or_none(entry.get("quote_liquidity_usd"))
         if quote_liquidity is None or quote_liquidity < min_quote_liquidity:
@@ -705,20 +722,18 @@ def load_bearer_token():
 
 
 def build_x_query(token_address, config):
-    excluded_usernames = [
-        normalize_username(username)
-        for username in (
-            list(config.get("excluded_author_usernames", []) or [])
-            + list(config.get("automated_author_usernames", []) or [])
-        )
-    ]
-    excluded_usernames = [username for username in excluded_usernames if username]
-    exclusions = " ".join(f"-from:{username}" for username in excluded_usernames)
-
-    if not exclusions:
-        return f'"{token_address}"'
-
-    return f'"{token_address}" {exclusions}'
+    query = f'"{token_address}"'
+    seen = set()
+    for value in config.get("query_excluded_author_usernames", []) or []:
+        username = normalize_username(value)
+        if not username or username.lower() in seen:
+            continue
+        candidate = f"{query} -from:{username}"
+        if len(candidate) > 512:
+            break
+        query = candidate
+        seen.add(username.lower())
+    return query
 
 
 def search_token_mentions(token_address, bearer_token, max_results, config):
@@ -957,6 +972,18 @@ def is_automated_author(user, config):
             return True
 
     return False
+
+
+def is_blacklisted_author(user, config):
+    username = normalize_username(user.get("username"))
+    if not username:
+        return False
+    blocked = {
+        normalize_username(value).lower()
+        for value in (config.get("excluded_author_usernames") or [])
+        if normalize_username(value)
+    }
+    return username.lower() in blocked
 
 
 def follower_rank(followers_count, config):
@@ -1229,8 +1256,15 @@ def complete_trigger_posts(trigger_posts, tweets, users_by_id, limit=3):
 
 
 def build_social_analysis(response_payload, config, bearer_token=None):
-    tweets = response_payload.get("data") or []
-    users = response_payload.get("includes", {}).get("users", [])
+    raw_tweets = response_payload.get("data") or []
+    raw_users = response_payload.get("includes", {}).get("users", [])
+    blocked_user_ids = {
+        user.get("id")
+        for user in raw_users
+        if is_blacklisted_author(user, config)
+    }
+    tweets = [tweet for tweet in raw_tweets if tweet.get("author_id") not in blocked_user_ids]
+    users = [user for user in raw_users if user.get("id") not in blocked_user_ids]
     min_author_followers_for_alert = int(config.get("followers_alert_threshold") or 0)
 
     users_by_id = {user.get("id"): user for user in users}
@@ -2136,7 +2170,12 @@ def run_cycle(config_file=CONFIG_FILE):
             if is_monitoring_active(entry) and expires_at:
                 active_tokens_in_window += 1
 
-            skip_reason = social_query_skip_reason(entry, config, current_time=current_time)
+            skip_reason = social_query_skip_reason(
+                entry,
+                config,
+                current_time=current_time,
+                chain_id=candidate["chain_id"],
+            )
             if not skip_reason:
                 eligible_social_candidates.append(candidate)
                 continue

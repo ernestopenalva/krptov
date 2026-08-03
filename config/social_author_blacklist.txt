@@ -1,33 +1,37 @@
 # KRPTO-V social author blacklist.
 # One X/Twitter username per line. Leading "@" is optional.
+# Scope: query = exclude before the X API charges for returned posts;
+#        local = exclude after retrieval as a second safety net.
+# Query entries are prioritized by observed noise volume and must stay
+# within the X query length limit.
 
-dexsignals
-VioletLewisk
-CamposHodgez
-MarksBensont
-Kissingmanr
-BankrScanner2
-dex_event_live
-erickita96
-BaseAlphaOnly
-AspenAubreeg
-wakisaik
-Renewstonem
-GrantsJoseph
-dexevents_miu
-Ghzz0018
-DavisMelodyt
-Bs_bobreka
-Yuguanglouy
-Dreamgzxt
-Zengzigangl
-Pepperjolix
-AutorunAlert
-dex_kolwatcher
-# Automated-post audit, 2026-07-27.
-bitecong
-solanatren59241
-specteronbase
-bsckolscanner
-bankrbot
-bankrscanner
+bitecong | query
+dex_kolwatcher | query
+solanatren59241 | query
+AutorunAlert | query
+specteronbase | query
+bsckolscanner | query
+dexevents_miu | query
+bankrbot | query
+BankrScanner2 | query
+GrantsJoseph | query
+bankrscanner | query
+Zengzigangl | query
+Ghzz0018 | query
+BaseAlphaOnly | query
+Renewstonem | query
+Pepperjolix | query
+erickita96 | query
+dex_event_live | query
+DavisMelodyt | query
+Bs_bobreka | query
+VioletLewisk | query
+MarksBensont | query
+Kissingmanr | query
+Dreamgzxt | query
+CamposHodgez | query
+
+AspenAubreeg | local
+Yuguanglouy | local
+wakisaik | local
+dexsignals | local
