@@ -1,7 +1,9 @@
 import argparse
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from src.tools import watchlist_ranking
@@ -74,12 +76,24 @@ class WatchlistRankingTests(unittest.TestCase):
         self.assertEqual(rows[0]["ca"], "0x1111111111111111111111111111111111111111")
         self.assertEqual(rows[0]["minimum_age"], "45m")
         self.assertEqual(rows[0]["window"], "fila")
-        self.assertIn(("ca", "CA", 42), watchlist_ranking.table_columns(width=160))
+        self.assertIn(("ca", "CA", 44), watchlist_ranking.table_columns(width=160))
         self.assertIn(("window", "Jan", 5), watchlist_ranking.table_columns(width=160))
         self.assertNotIn(("sanity", "San", 3), watchlist_ranking.table_columns(width=160))
         self.assertNotIn(("done", "Reas", 6), watchlist_ranking.table_columns(width=160))
-        self.assertNotIn(("ca", "CA", 42), watchlist_ranking.table_columns(width=80))
+        self.assertNotIn(("ca", "CA", 44), watchlist_ranking.table_columns(width=80))
         self.assertNotIn(("done", "Reas", 5), watchlist_ranking.table_columns(width=80))
+
+    def test_wide_table_preserves_full_solana_address(self):
+        token_address = "91HfWjQwnuRp5C7NiwaD1YhtpmTm8fTuHYRYiJSkPump"
+        row = {
+            key: "-"
+            for key, _, _ in watchlist_ranking.table_columns(width=160)
+        }
+        row["ca"] = token_address
+        output = io.StringIO()
+        with redirect_stdout(output):
+            watchlist_ranking.print_table([row], width=160)
+        self.assertIn(token_address, output.getvalue())
 
     def test_eligible_only_filters_social_candidates(self):
         watchlist = {

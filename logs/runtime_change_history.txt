@@ -23,3 +23,9 @@ validacao=25 testes de inferencia social e market ranker aprovados
 evento=Scheduler passou a ignorar candidatos de monitor sem pair_address/pool_address; seis entradas Base antigas identificadas para arquivamento controlado
 arquivos=src/modules/scheduler.py,data/watchlist.json,data/watchlist_archive.jsonl
 validacao=entradas PumpPortal com endereco=89; entradas Base antigas sem endereco=6
+
+## 2026-08-03T02:38:23-03:00
+
+evento=Watchlist Ranking passou a exibir CAs Solana completos com 44 caracteres na tabela ampla
+arquivos=src/tools/watchlist_ranking.py,src/test/test_watchlist_ranking.py
+validacao=14 testes da ferramenta aprovados; teste dedicado confirma que o CA Solana nao e truncado

@@ -794,7 +794,9 @@ def table_columns(width=None, circuit="inference"):
             ("quote_liq", "QLiq", 8),
             ("vol", "Vol", 8),
             ("txns", "Tx24h", 6),
-            ("ca", "CA", 42),
+            # EVM addresses use 42 characters, while Solana public keys can
+            # use 44. Keep the full value so copied CAs remain valid.
+            ("ca", "CA", 44),
             ("name", "Nome", 18),
         ]
 
