@@ -74,7 +74,9 @@ def pair_for(token_address, pair_address, liquidity=5000):
         "baseToken": {"address": token_address, "symbol": "TEST", "name": "Test Token"},
         "quoteToken": {"address": "0x0000000000000000000000000000000000000000", "symbol": "ETH"},
         "pairCreatedAt": int(datetime(2026, 6, 6, 11, 56, 0, tzinfo=timezone.utc).timestamp() * 1000),
-        "liquidity": {"usd": liquidity},
+        "priceNative": "0.001",
+        "priceUsd": "2",
+        "liquidity": {"usd": liquidity, "base": 1000, "quote": 5},
         "volume": {"h24": 1000},
         "txns": {"h24": {"buys": 10, "sells": 10}},
     }
@@ -221,6 +223,26 @@ class MarketRankerBatchTests(unittest.TestCase):
         self.assertEqual(metrics["quote_liquidity_usd"], 7000)
         self.assertEqual(metrics["selected_quote_liquidity_usd"], 4000)
         self.assertGreater(score, 80)
+
+    def test_quote_liquidity_gate_is_global_and_rejects_missing_or_below_one(self):
+        config = {"social_inference": {"min_quote_liquidity_usd": 1}}
+        minimum = market_ranker.minimum_quote_liquidity_usd(config)
+        self.assertEqual(minimum, 1)
+        self.assertEqual(
+            market_ranker.quote_liquidity_block_reason({"chain": "solana"}, minimum),
+            "market_admission_missing_quote_liquidity",
+        )
+        self.assertEqual(
+            market_ranker.quote_liquidity_block_reason(
+                {"chain": "ethereum", "quote_liquidity_usd": 0.99}, minimum
+            ),
+            "market_admission_low_quote_liquidity",
+        )
+        self.assertIsNone(
+            market_ranker.quote_liquidity_block_reason(
+                {"chain": "solana", "quote_liquidity_usd": 1}, minimum
+            )
+        )
 
     def test_bsc_quotes_are_trusted_for_quote_liquidity(self):
         token_address = "0x1111111111111111111111111111111111111111"
@@ -537,6 +559,7 @@ class MarketRankerBatchTests(unittest.TestCase):
                         "social_status": "ativo",
                         "social_eligibility": "blocked_old_market",
                         "market_score": 70,
+                        "quote_liquidity_usd": 1,
                     }
                 }),
                 encoding="utf-8",
@@ -585,6 +608,7 @@ class MarketRankerBatchTests(unittest.TestCase):
                         old_key: {
                             **token_entry(old_token, old_key),
                             "market_score": 50,
+                            "quote_liquidity_usd": 1,
                             "social_eligibility": "eligible",
                         },
                     }
@@ -597,6 +621,7 @@ class MarketRankerBatchTests(unittest.TestCase):
                         new_key: {
                             **token_entry(new_token, new_key),
                             "market_score": 90,
+                            "quote_liquidity_usd": 1,
                             "social_eligibility": "eligible",
                             "ranking_attempts": 1,
                             "ranking_first_seen_at_utc": "2026-06-06T11:59:00Z",

@@ -1240,6 +1240,8 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
     rejected = 0
     expired = 0
     social_orphans_repaired = 0
+    blocked_quote_liquidity = 0
+    min_quote_liquidity = minimum_quote_liquidity_usd(config)
 
     with watchlist_lock():
         watchlist = load_watchlist()
@@ -1277,6 +1279,18 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
                 kept_watchlist[watchlist_key] = entry
                 continue
 
+            quote_reason = quote_liquidity_block_reason(entry, min_quote_liquidity)
+            if quote_reason:
+                blocked_quote_liquidity += 1
+                removed_records.append(
+                    {
+                        "reason": quote_reason,
+                        "watchlist_key": watchlist_key,
+                        "entry": entry,
+                    }
+                )
+                continue
+
             reason = retention_reason(entry, retention_cfg, current_time)
             if reason:
                 removed_records.append(
@@ -1298,6 +1312,21 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
         for watchlist_key, entry in list(buffer.items()):
             if not isinstance(entry, dict):
                 continue
+
+            if ranking_score(entry) is not None:
+                quote_reason = quote_liquidity_block_reason(entry, min_quote_liquidity)
+                if quote_reason:
+                    buffer.pop(watchlist_key, None)
+                    rejected += 1
+                    blocked_quote_liquidity += 1
+                    removed_records.append(
+                        {
+                            "reason": f"rejected_{quote_reason}",
+                            "watchlist_key": watchlist_key,
+                            "entry": entry,
+                        }
+                    )
+                    continue
 
             if buffer_entry_expired(entry, buffer_cfg, current_time):
                 buffer.pop(watchlist_key, None)
@@ -1392,6 +1421,8 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
         "rejected_from_buffer": rejected,
         "expired_from_buffer": expired,
         "social_orphans_repaired": social_orphans_repaired,
+        "blocked_quote_liquidity": blocked_quote_liquidity,
+        "min_quote_liquidity_usd": min_quote_liquidity,
         "max_entries": max_entries,
         "remaining": len(load_watchlist()),
         "buffer_remaining": len(load_ranking_buffer(config)),
@@ -1404,6 +1435,23 @@ def retention_config(config):
     configured = market_ranker_config(config).get("watchlist_retention") or {}
     defaults = DEFAULT_CONFIG["market_ranker"]["watchlist_retention"]
     return merge_dict(defaults, configured)
+
+
+def minimum_quote_liquidity_usd(config):
+    """Global first gate shared with Social Inference."""
+    social = config.get("social_inference") or {}
+    return max(0.0, config_float(social, "min_quote_liquidity_usd", 1))
+
+
+def quote_liquidity_block_reason(entry, minimum):
+    if minimum <= 0:
+        return None
+    value = numeric_or_none(entry.get("quote_liquidity_usd"))
+    if value is None:
+        return "market_admission_missing_quote_liquidity"
+    if value < minimum:
+        return "market_admission_low_quote_liquidity"
+    return None
 
 
 def config_int(config, key, default_value):
@@ -1683,6 +1731,7 @@ def print_summary(summary, results):
             f"rejeitados_buffer={retention.get('rejected_from_buffer', 0)} | "
             f"expirados_buffer={retention.get('expired_from_buffer', 0)} | "
             f"orfaos_sociais_reparados={retention.get('social_orphans_repaired', 0)} | "
+            f"bloqueados_qliq={retention.get('blocked_quote_liquidity', 0)} | "
             f"buffer={retention.get('buffer_remaining', 0)} | "
             f"restantes={retention.get('remaining')} | "
             f"teto={retention.get('max_entries')}"

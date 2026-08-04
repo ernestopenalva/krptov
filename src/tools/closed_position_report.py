@@ -53,6 +53,7 @@ def load_closed_positions(path: Path) -> Iterable[Dict[str, Any]]:
                 or "-"
             )
             quote = signal.get("quote_token") or tick.get("raw", {}).get("quote_symbol") or "-"
+            signal_tick = signal.get("signal_tick") or {}
             yield {
                 "entry_time": position.get("entry_time"),
                 "entry_price_usd": entry,
@@ -67,6 +68,16 @@ def load_closed_positions(path: Path) -> Iterable[Dict[str, Any]]:
                 "token_address": position.get("token_address") or signal.get("token_address") or "-",
                 "chain": chain,
                 "social": signal.get("admission_source") == "social_alert" or signal.get("rank_bypass") is True,
+                "market_score": safe_float(signal.get("market_score")),
+                "quote_liquidity_usd": safe_float(signal.get("quote_liquidity_usd")),
+                "liquidity_usd": safe_float(signal.get("liquidity_usd")),
+                "minimum_age_minutes": safe_float(signal.get("minimum_token_age_inferred_minutes")),
+                "volume_h24": safe_float(signal.get("volume_h24")),
+                "txns_h24": safe_float(signal.get("txns_h24")),
+                "signal_liquidity_usd": safe_float(signal_tick.get("liquidity_usd")),
+                "signal_volume_m5": safe_float(signal_tick.get("volume_m5")),
+                "signal_buy_pressure": safe_float(signal_tick.get("buy_pressure")),
+                "signal_price_change_m5": safe_float(signal_tick.get("price_change_m5")),
             }
 
 

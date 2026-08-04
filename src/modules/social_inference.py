@@ -700,8 +700,6 @@ def social_query_skip_reason(entry, config, current_time=None, chain_id=None):
             return SOCIAL_SKIP_REASON_MISSING_MARKET_SCORE
 
     min_quote_liquidity = numeric_or_none(config.get("min_quote_liquidity_usd"))
-    if str(chain_id or entry.get("chain_id") or entry.get("chain") or "").lower() == "solana":
-        min_quote_liquidity = None
     if min_quote_liquidity is not None and min_quote_liquidity > 0:
         quote_liquidity = numeric_or_none(entry.get("quote_liquidity_usd"))
         if quote_liquidity is None or quote_liquidity < min_quote_liquidity:

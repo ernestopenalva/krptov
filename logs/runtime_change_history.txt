@@ -42,3 +42,10 @@ observabilidade=status do Scheduler passa a expor capacidade e contagem por chai
 evento=Separacao corrigida entre WL principal e WL tecnica; Monitor deixa de carregar status social e deixa de repovoar a inferencia; estados sociais ativos sem janela completa sao reparados e voltam ao fluxo normal de retencao
 arquivos=src/modules/monitor_watchlist.py,src/modules/market_ranker.py,src/test/test_monitor_position_runtime.py,src/test/test_market_ranker_batch.py
 reparo=ativo sem social_monitoring_started_at/social_monitoring_expires_at volta a novo/pendente com auditoria social_runtime_repair_reason; blocked_old_market e arquivado pela retencao vigente
+
+## 2026-08-04T01:07:58-03:00
+
+evento=QLiq minima de US$ 1 passa a ser porta universal de admissao para todas as chains e para os circuitos social e tecnico; Solana deixa de ter excecao
+arquivos=src/modules/market_ranker.py,src/modules/social_inference.py,config/config.yaml,src/test/test_market_ranker_batch.py,src/test/test_social_eligibility.py
+regra=quote_liquidity_usd ausente ou menor que 1 nao e promovida pelo ranker; entradas existentes sao arquivadas com motivo explicito; ranking_buffer sem QLiq medido aguarda score e depois e bloqueado se a metrica continuar ausente
+estudo=src/tools/stop_loss_filter_study.py compara filtros isolados de QLiq,LiqDS,MinAg,score,volume,transacoes e variacao m5 contra positions com PNL catastrofico

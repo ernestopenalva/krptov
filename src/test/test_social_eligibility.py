@@ -179,7 +179,7 @@ class SocialEligibilityTests(unittest.TestCase):
             social_inference.social_query_skip_reason(base_entry, config, current_time=current_time)
         )
 
-    def test_solana_is_not_blocked_by_quote_liquidity(self):
+    def test_solana_obeys_global_quote_liquidity_gate(self):
         config = {**social_inference.DEFAULT_CONFIG, "min_quote_liquidity_usd": 1}
         entry = {
             "chain_id": "solana",
@@ -188,12 +188,13 @@ class SocialEligibilityTests(unittest.TestCase):
             "market_score": 50,
             "quote_liquidity_usd": None,
         }
-        self.assertIsNone(
+        self.assertEqual(
             social_inference.social_query_skip_reason(
                 entry,
                 config,
                 chain_id="solana",
-            )
+            ),
+            "low_quote_liquidity",
         )
 
     def test_blacklist_scope_limits_query_but_keeps_full_local_list(self):
@@ -400,7 +401,9 @@ class SocialEligibilityTests(unittest.TestCase):
                     "baseToken": {"address": token_address, "symbol": "TEST"},
                     "quoteToken": {"address": "0x0000000000000000000000000000000000000000", "symbol": "ETH"},
                     "pairCreatedAt": old_pair_created_at,
-                    "liquidity": {"usd": 100},
+                    "priceNative": "0.001",
+                    "priceUsd": "2",
+                    "liquidity": {"usd": 100, "base": 1000, "quote": 1},
                     "volume": {"h24": 0},
                     "txns": {"h24": {"buys": 0, "sells": 0}},
                 },
@@ -411,7 +414,9 @@ class SocialEligibilityTests(unittest.TestCase):
                     "baseToken": {"address": token_address, "symbol": "TEST"},
                     "quoteToken": {"address": "0x0000000000000000000000000000000000000000", "symbol": "ETH"},
                     "pairCreatedAt": fresh_pair_created_at,
-                    "liquidity": {"usd": 5000},
+                    "priceNative": "0.001",
+                    "priceUsd": "2",
+                    "liquidity": {"usd": 5000, "base": 1000, "quote": 1},
                     "volume": {"h24": 1000},
                     "txns": {"h24": {"buys": 5, "sells": 5}},
                 },
@@ -484,7 +489,9 @@ class SocialEligibilityTests(unittest.TestCase):
                     "baseToken": {"address": token_address, "symbol": "TEST"},
                     "quoteToken": {"address": "0x0000000000000000000000000000000000000000", "symbol": "ETH"},
                     "pairCreatedAt": fresh_pair_created_at,
-                    "liquidity": {"usd": 5000},
+                    "priceNative": "0.001",
+                    "priceUsd": "2",
+                    "liquidity": {"usd": 5000, "base": 1000, "quote": 1},
                     "volume": {"h24": 1000},
                     "txns": {"h24": {"buys": 5, "sells": 5}},
                 },
