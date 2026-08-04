@@ -55,6 +55,7 @@ EXCLUDED_PREFIXES = ("social_", "telegram_", "last_alert_", "best_social_")
 EXCLUDED_FIELDS = {
     "best_alert_rank",
     "discarded_reason",
+    "status",
     "status_reason",
     "social_status",
 }
@@ -169,6 +170,19 @@ def _ranker_projection(entry: Dict[str, Any], rank: int) -> Dict[str, Any]:
     return projected
 
 
+def _without_social_state(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip inference-owned state from a technical runtime entry."""
+    return {
+        key: value
+        for key, value in entry.items()
+        if key in RUNTIME_FIELDS
+        or (
+            key not in EXCLUDED_FIELDS
+            and not key.startswith(EXCLUDED_PREFIXES)
+        )
+    }
+
+
 def sync_ranked_watchlist(ranked_entries: Iterable[tuple[str, Dict[str, Any]]]) -> Dict[str, int]:
     """Merge the current technical ranking without touching live runtime state."""
     ranked = list(ranked_entries)
@@ -200,7 +214,7 @@ def sync_ranked_watchlist(ranked_entries: Iterable[tuple[str, Dict[str, Any]]]) 
                 "reserved", "monitoring", "cooldown", "position_open",
             }
             if keep_runtime:
-                carried = existing.copy()
+                carried = _without_social_state(existing)
                 carried["technical_rank"] = None
                 result[key] = carried
 

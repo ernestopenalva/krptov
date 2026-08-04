@@ -280,6 +280,36 @@ class MonitorWatchlistTests(unittest.TestCase):
         self.assertEqual(entry["monitor_attempts"], 1)
         self.assertTrue(entry["rank_bypass"])
 
+    def test_monitor_projection_never_carries_social_status(self):
+        source = {
+            "watchlist_key": "solana:a",
+            "status": "ativo",
+            "social_status": "ativo",
+            "social_monitoring_started_at": "2026-01-01T00:00:00+00:00",
+            "social_monitoring_expires_at": "2026-01-01T02:00:00+00:00",
+            "market_score": 90,
+        }
+        store.sync_ranked_watchlist([("solana:a", source)])
+        entry = store.load_monitor_watchlist()["solana:a"]
+        self.assertNotIn("status", entry)
+        self.assertNotIn("social_status", entry)
+        self.assertNotIn("social_monitoring_started_at", entry)
+        self.assertNotIn("social_monitoring_expires_at", entry)
+
+        store.mutate_entry("solana:a", {
+            "status": "ativo",
+            "monitor_status": "cooldown",
+            "rank_bypass": True,
+            "social_ready_at_utc": "2026-01-01T00:00:00+00:00",
+            "social_alert_snapshot": {"posts_found": 2},
+        })
+        store.sync_ranked_watchlist([])
+        carried = store.load_monitor_watchlist()["solana:a"]
+        self.assertNotIn("status", carried)
+        self.assertEqual(carried["monitor_status"], "cooldown")
+        self.assertEqual(carried["social_ready_at_utc"], "2026-01-01T00:00:00+00:00")
+        self.assertEqual(carried["social_alert_snapshot"], {"posts_found": 2})
+
     def test_campaign_prices_survive_cooldown_and_rank_refresh(self):
         row = {"watchlist_key": "base:campaign", "market_score": 50}
         store.sync_ranked_watchlist([("base:campaign", row)])

@@ -36,3 +36,9 @@ evento=Controle de capacidade adicionado exclusivamente para Position Solana; no
 arquivos=src/modules/position.py,config/config.yaml,src/test/test_monitor_position_runtime.py
 configuracao=position.max_active_positions_by_chain.solana=5
 observabilidade=status do Scheduler passa a expor capacidade e contagem por chain; primeira recusa de cada token durante saturacao fica registrada como position_capacity_reached
+
+## 2026-08-04T00:32:37-03:00
+
+evento=Separacao corrigida entre WL principal e WL tecnica; Monitor deixa de carregar status social e deixa de repovoar a inferencia; estados sociais ativos sem janela completa sao reparados e voltam ao fluxo normal de retencao
+arquivos=src/modules/monitor_watchlist.py,src/modules/market_ranker.py,src/test/test_monitor_position_runtime.py,src/test/test_market_ranker_batch.py
+reparo=ativo sem social_monitoring_started_at/social_monitoring_expires_at volta a novo/pendente com auditoria social_runtime_repair_reason; blocked_old_market e arquivado pela retencao vigente

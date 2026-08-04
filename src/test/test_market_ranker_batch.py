@@ -516,6 +516,56 @@ class MarketRankerBatchTests(unittest.TestCase):
             self.assertIn(eligible_key, updated)
             self.assertIn("retention_blocked_old_market", archive_text)
 
+    def test_ranker_repairs_and_archives_orphaned_active_social_state(self):
+        current_time = datetime(2026, 8, 4, 3, 30, 0, tzinfo=timezone.utc)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            watchlist_file = root / "watchlist.json"
+            buffer_file = root / "ranking_buffer.json"
+            lock_file = root / "watchlist.lock"
+            archive_file = root / "archive.jsonl"
+            token = "orphaned-solana-mint"
+            key = f"solana:{token}"
+            watchlist_file.write_text(
+                json.dumps({
+                    key: {
+                        **token_entry(token, key),
+                        "chain": "solana",
+                        "chain_id": "solana",
+                        "status": "ativo",
+                        "social_status": "ativo",
+                        "social_eligibility": "blocked_old_market",
+                        "market_score": 70,
+                    }
+                }),
+                encoding="utf-8",
+            )
+            buffer_file.write_text("{}", encoding="utf-8")
+            config = {
+                "market_ranker": {
+                    "watchlist_retention": {
+                        "enabled": True,
+                        "max_entries": 500,
+                        "archive_removed": True,
+                        "archive_file": str(archive_file),
+                        "blocked_old_market_retention_hours": 0,
+                    },
+                    "ranking_buffer": {"file": str(buffer_file)},
+                }
+            }
+
+            with patch.object(market_ranker, "WATCHLIST_FILE", watchlist_file), patch.object(
+                market_ranker, "WATCHLIST_LOCK_FILE", lock_file
+            ):
+                summary = market_ranker.apply_ranker_updates_and_selection({}, config, current_time)
+
+            self.assertEqual(summary["social_orphans_repaired"], 1)
+            self.assertNotIn(key, json.loads(watchlist_file.read_text(encoding="utf-8")))
+            archive_text = archive_file.read_text(encoding="utf-8")
+            self.assertIn("orphan_active_missing_monitoring_window", archive_text)
+            self.assertIn("retention_blocked_old_market", archive_text)
+
     def test_ranked_buffer_token_replaces_lower_ranked_watchlist_entry(self):
         current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)
 

@@ -17,7 +17,7 @@ from src.modules.chain_identity import (
     split_watchlist_key as split_canonical_watchlist_key,
 )
 from src.modules.chain_routing import circuit_enabled, load_routing_sections
-from src.modules.monitor_watchlist import load_monitor_watchlist, sync_ranked_watchlist
+from src.modules.monitor_watchlist import sync_ranked_watchlist
 
 
 MARKET_RANKER_VERSION = "krptov-market-ranker-v1-2026-06-03"
@@ -1239,20 +1239,10 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
     promoted = 0
     rejected = 0
     expired = 0
-
-    monitor_source = {}
-    if WATCHLIST_FILE == PROJECT_ROOT / "data" / "watchlist.json":
-        monitor_source = load_monitor_watchlist()
+    social_orphans_repaired = 0
 
     with watchlist_lock():
         watchlist = load_watchlist()
-        for watchlist_key, entry in monitor_source.items():
-            if (
-                watchlist_key not in watchlist
-                and isinstance(entry, dict)
-                and entry.get("rank_bypass") is not True
-            ):
-                watchlist[watchlist_key] = entry.copy()
         buffer = load_json(buffer_path, {})
         if not isinstance(buffer, dict):
             buffer = {}
@@ -1269,6 +1259,10 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
                     entry.pop(field, None)
                 entry.update(update)
                 update_buffer_attempt_metadata(entry, current_time)
+
+        for entry in watchlist.values():
+            if repair_orphaned_social_runtime(entry, current_time):
+                social_orphans_repaired += 1
 
         for watchlist_key in list(buffer.keys()):
             if watchlist_key in watchlist:
@@ -1397,6 +1391,7 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
         "promoted_from_buffer": promoted,
         "rejected_from_buffer": rejected,
         "expired_from_buffer": expired,
+        "social_orphans_repaired": social_orphans_repaired,
         "max_entries": max_entries,
         "remaining": len(load_watchlist()),
         "buffer_remaining": len(load_ranking_buffer(config)),
@@ -1473,6 +1468,33 @@ def is_retention_protected(entry):
             and not entry.get("social_completed_reason")
         )
     )
+
+
+def repair_orphaned_social_runtime(entry, current_time):
+    """Reset impossible active social states that have no complete time window."""
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("social_status") == "concluido" or entry.get("social_completed_reason"):
+        return False
+    social_active = (
+        entry.get("social_status") == STATUS_ATIVO
+        or (
+            entry.get("status") == STATUS_ATIVO
+            and entry.get("social_status") in {None, "", "pendente"}
+        )
+    )
+    if not social_active:
+        return False
+    if entry.get("social_monitoring_started_at") and entry.get("social_monitoring_expires_at"):
+        return False
+
+    entry["status"] = STATUS_NOVO
+    entry["social_status"] = "pendente"
+    entry.pop("social_monitoring_started_at", None)
+    entry.pop("social_monitoring_expires_at", None)
+    entry["social_runtime_repaired_at_utc"] = to_iso(current_time)
+    entry["social_runtime_repair_reason"] = "orphan_active_missing_monitoring_window"
+    return True
 
 
 def is_watchlist_finalized(entry):
@@ -1660,6 +1682,7 @@ def print_summary(summary, results):
             f"promovidos_buffer={retention.get('promoted_from_buffer', 0)} | "
             f"rejeitados_buffer={retention.get('rejected_from_buffer', 0)} | "
             f"expirados_buffer={retention.get('expired_from_buffer', 0)} | "
+            f"orfaos_sociais_reparados={retention.get('social_orphans_repaired', 0)} | "
             f"buffer={retention.get('buffer_remaining', 0)} | "
             f"restantes={retention.get('remaining')} | "
             f"teto={retention.get('max_entries')}"
@@ -1718,14 +1741,6 @@ def run_cycle(dry_run=False, session=requests):
     current_time = utc_now()
     now_text = to_iso(current_time)
     watchlist = load_watchlist()
-    if WATCHLIST_FILE == PROJECT_ROOT / "data" / "watchlist.json":
-        for watchlist_key, entry in load_monitor_watchlist().items():
-            if (
-                watchlist_key not in watchlist
-                and isinstance(entry, dict)
-                and entry.get("rank_bypass") is not True
-            ):
-                watchlist[watchlist_key] = entry
     ranking_buffer = load_ranking_buffer(config)
     state = load_state()
     rankable_tokens = select_rankable_tokens(watchlist) + select_rankable_tokens(
