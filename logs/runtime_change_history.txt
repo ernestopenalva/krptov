@@ -58,3 +58,12 @@ rpc_pumpswap=layout imutavel da pool armazenado em cache; dois vaults e slot lid
 protecoes_adicionais=nenhum backoff novo adicionado nesta alteracao
 arquivos=config/config.yaml,src/modules/market_ranker.py,src/market_data/pumpswap_provider.py,src/test/test_market_ranker_batch.py,src/test/test_pumpswap_provider.py
 validacao=49 testes aprovados incluindo ranker,social,monitor,position e provider PumpSwap
+
+## 2026-08-05T00:26:34-03:00
+
+evento=MinAg EVM recuperado por fallback seletivo ao endpoint completo da Dexscreener quando o endpoint rapido omite pairCreatedAt; identidade de pool EVM volta a pertencer exclusivamente ao Pool Scanner
+fallback=ate 30 consultas token-pairs por ciclo somente para chains nao Solana sem idade; resultado positivo e reutilizado; falha ou resposta ainda sem data respeita intervalo de 15 minutos
+enderecos=pair_address e pool_address selecionados pela Dexscreener passam a completar somente descobertas Solana/PumpPortal; EVM deixa de ser sobrescrita pelo ranker
+nao_alterado=formula de score,QLiq,inferencia social,monitor,position e roteamento entre circuitos
+arquivos=config/config.yaml,src/modules/market_ranker.py,src/test/test_market_ranker_batch.py
+validacao=57 testes de ranker,elegibilidade social,watchlist e scanner Solana aprovados

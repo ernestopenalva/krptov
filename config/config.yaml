@@ -121,6 +121,12 @@ market_ranker:
   admission_min_quote_liquidity_usd_by_chain:
     solana: 1
 
+  # O endpoint rapido pode omitir pairCreatedAt. O endpoint completo e usado
+  # somente para EVM sem idade, com cache positivo e intervalo apos falha/vazio.
+  age_fallback:
+    max_calls_per_cycle: 30
+    retry_minutes: 15
+
   score_weights:
     quote_liquidity: 5
     volume_h24: 3

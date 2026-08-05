@@ -53,6 +53,18 @@ class FakeBatchSession:
         return FakeResponse(self.pairs)
 
 
+class FakeFallbackSession:
+    def __init__(self, batch_pairs, complete_pairs):
+        self.batch_pairs = batch_pairs
+        self.complete_pairs = complete_pairs
+        self.urls = []
+
+    def get(self, url, timeout):
+        self.urls.append(url)
+        payload = self.complete_pairs if "/token-pairs/v1/" in url else self.batch_pairs
+        return FakeResponse(payload)
+
+
 def token_entry(token_address, watchlist_key):
     return {
         "watchlist_key": watchlist_key,
@@ -132,13 +144,90 @@ class MarketRankerBatchTests(unittest.TestCase):
             updated = json.loads(watchlist_file.read_text(encoding="utf-8"))
             self.assertEqual(updated[key_a]["token_symbol"], "TEST")
             self.assertEqual(updated[key_a]["token_name"], "Test Token")
-            self.assertEqual(updated[key_a]["pair_address"], "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-            self.assertEqual(updated[key_a]["pool_address"], "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            self.assertNotIn("pair_address", updated[key_a])
+            self.assertNotIn("pool_address", updated[key_a])
             self.assertEqual(updated[key_a]["liquidity_usd"], 5000)
             self.assertEqual(updated[key_a]["volume_h24"], 1000)
             self.assertEqual(updated[key_a]["txns_h24"], 20)
             self.assertEqual(updated[key_a]["minimum_token_age_inferred_minutes"], 4)
             self.assertEqual(updated[key_a]["minimum_token_age_inferred_source"], "oldest_pair")
+
+    def test_missing_batch_age_uses_complete_endpoint_and_persists_result(self):
+        current_time = datetime(2026, 8, 5, 3, 0, 0, tzinfo=timezone.utc)
+        token_address = "0x1111111111111111111111111111111111111111"
+        key = f"ethereum:{token_address}"
+        batch_pair = pair_for(
+            token_address, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        batch_pair.pop("pairCreatedAt")
+        complete_pair = dict(batch_pair)
+        complete_pair["pairCreatedAt"] = int(
+            datetime(2026, 8, 5, 2, 56, 0, tzinfo=timezone.utc).timestamp() * 1000
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            watchlist_file = root / "watchlist.json"
+            state_file = root / "state.json"
+            market_dir = root / "market_ranker"
+            lock_file = root / "watchlist.lock"
+            watchlist_file.write_text(
+                json.dumps({key: token_entry(token_address, key)}), encoding="utf-8"
+            )
+            session = FakeFallbackSession([batch_pair], [complete_pair])
+
+            with patch.object(market_ranker, "WATCHLIST_FILE", watchlist_file), patch.object(
+                market_ranker, "WATCHLIST_LOCK_FILE", lock_file
+            ), patch.object(market_ranker, "STATE_FILE", state_file), patch.object(
+                market_ranker, "MARKET_RANKER_DATA_DIR", market_dir
+            ), patch.object(market_ranker, "DATA_DIR", root), patch.object(
+                market_ranker, "utc_now", return_value=current_time
+            ), patch.object(
+                market_ranker, "maybe_send_ops_alert", return_value=None
+            ):
+                summary = market_ranker.run_cycle(dry_run=False, session=session)
+
+            self.assertEqual(summary["dex_batch_calls"], 1)
+            self.assertEqual(summary["dex_age_fallback_calls"], 1)
+            self.assertEqual(summary["dex_age_fallback_resolved"], 1)
+            self.assertEqual(len(session.urls), 2)
+            self.assertIn("/tokens/v1/ethereum/", session.urls[0])
+            self.assertIn("/token-pairs/v1/ethereum/", session.urls[1])
+            updated = json.loads(watchlist_file.read_text(encoding="utf-8"))[key]
+            self.assertEqual(updated["minimum_token_age_inferred_minutes"], 4)
+            self.assertEqual(updated["social_eligibility"], "eligible")
+            self.assertEqual(updated["age_fallback_status"], "resolved")
+            self.assertNotIn("pair_address", updated)
+            self.assertNotIn("pool_address", updated)
+
+    def test_cached_oldest_pair_avoids_repeating_age_fallback(self):
+        current_time = datetime(2026, 8, 5, 3, 0, 0, tzinfo=timezone.utc)
+        entry = {
+            "oldest_pair_created_at_utc": "2026-08-05T02:56:00Z",
+        }
+        cached = market_ranker.cached_age_pair(entry)
+        inferred = market_ranker.minimum_token_age_inferred(
+            [cached], None, current_time
+        )
+        self.assertEqual(inferred["minimum_token_age_inferred_minutes"], 4)
+
+    def test_selected_pair_address_is_completed_only_for_solana(self):
+        pair = {"pairAddress": "pump-swap-address"}
+        self.assertEqual(
+            market_ranker.selected_pair_address_update(
+                {"chain": "solana"}, pair
+            ),
+            {
+                "pair_address": "pump-swap-address",
+                "pool_address": "pump-swap-address",
+            },
+        )
+        self.assertEqual(
+            market_ranker.selected_pair_address_update(
+                {"chain": "ethereum"}, pair
+            ),
+            {},
+        )
 
     def test_market_score_uses_quote_liquidity_and_marks_misleading_liquidity(self):
         current_time = datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc)

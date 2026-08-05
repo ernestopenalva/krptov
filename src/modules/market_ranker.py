@@ -111,6 +111,10 @@ DEFAULT_CONFIG = {
         "admission_min_quote_liquidity_usd_by_chain": {
             "solana": 1,
         },
+        "age_fallback": {
+            "max_calls_per_cycle": 30,
+            "retry_minutes": 15,
+        },
         "social_eligibility": {
             "max_pool_age_minutes": 30,
         },
@@ -600,6 +604,38 @@ def fetch_token_pairs_batch(chain, token_addresses, session=requests):
     response.raise_for_status()
     payload = response.json()
     return payload if isinstance(payload, list) else []
+
+
+def cached_age_pair(entry):
+    created_at = parse_iso(entry.get("oldest_pair_created_at_utc"))
+    if not created_at:
+        return None
+    return {"pairCreatedAt": int(created_at.timestamp() * 1000)}
+
+
+def age_fallback_config(config):
+    configured = market_ranker_config(config).get("age_fallback") or {}
+    defaults = DEFAULT_CONFIG["market_ranker"]["age_fallback"]
+    return merge_dict(defaults, configured)
+
+
+def age_fallback_due(entry, current_time, config):
+    last_checked = parse_iso(entry.get("age_fallback_last_checked_at_utc"))
+    if not last_checked:
+        return True
+    retry_minutes = max(1, config_int(config, "retry_minutes", 15))
+    return (current_time - last_checked).total_seconds() >= retry_minutes * 60
+
+
+def selected_pair_address_update(token, selected_pair):
+    chain = str(token.get("chain") or "").strip().lower()
+    selected_pair_address = selected_pair.get("pairAddress") if selected_pair else None
+    if chain != "solana" or not selected_pair_address:
+        return {}
+    return {
+        "pair_address": selected_pair_address,
+        "pool_address": selected_pair_address,
+    }
 
 
 def batched(items, batch_size):
@@ -1746,6 +1782,12 @@ def print_summary(summary, results):
     print(f"Tokens no buffer de ranking: {summary.get('ranking_buffer_total', 0)}")
     print(f"Tokens consultados: {summary['tokens_checked']}")
     print(f"Chamadas Dexscreener em lote: {summary.get('dex_batch_calls', 0)}")
+    print(
+        "Fallback MinAg Dexscreener: "
+        f"chamadas={summary.get('dex_age_fallback_calls', 0)} | "
+        f"resolvidos={summary.get('dex_age_fallback_resolved', 0)} | "
+        f"adiados_limite={summary.get('dex_age_fallback_skipped_limit', 0)}"
+    )
     print(f"Encontrados na Dexscreener: {summary['dex_found']}")
     print(f"Nao encontrados: {summary['dex_not_found']}")
     print(f"Erros: {summary['errors']}")
@@ -1814,6 +1856,7 @@ def run_cycle(dry_run=False, session=requests):
     weights = score_weights(config)
     eligibility_config = social_eligibility_config(config)
     sanity_config = market_sanity_config(config)
+    fallback_config = age_fallback_config(config)
     current_time = utc_now()
     now_text = to_iso(current_time)
     watchlist = load_watchlist()
@@ -1829,6 +1872,9 @@ def run_cycle(dry_run=False, session=requests):
     dex_found = 0
     dex_not_found = 0
     errors = 0
+    age_fallback_calls = 0
+    age_fallback_resolved = 0
+    age_fallback_skipped_limit = 0
     pairs_by_key, errors_by_key, dex_batch_calls = fetch_pairs_for_rankable_tokens(
         rankable_tokens,
         session=session,
@@ -1862,7 +1908,49 @@ def run_cycle(dry_run=False, session=requests):
 
             pairs = pairs_by_key.get(token["watchlist_key"], [])
             selected_pair, association_type = select_best_pair(pairs, token["entry"])
-            inferred_age = minimum_token_age_inferred(pairs, selected_pair, current_time)
+            age_pairs = list(pairs)
+            cached_pair = cached_age_pair(token["entry"])
+            if cached_pair:
+                age_pairs.append(cached_pair)
+            inferred_age = minimum_token_age_inferred(age_pairs, selected_pair, current_time)
+
+            chain = str(token.get("chain") or "").strip().lower()
+            max_fallback_calls = max(
+                0, config_int(fallback_config, "max_calls_per_cycle", 30)
+            )
+            needs_age_fallback = (
+                chain != "solana"
+                and selected_pair is not None
+                and inferred_age.get("minimum_token_age_inferred_minutes") is None
+                and age_fallback_due(token["entry"], current_time, fallback_config)
+            )
+            if needs_age_fallback and age_fallback_calls < max_fallback_calls:
+                age_fallback_calls += 1
+                updates_by_key[token["watchlist_key"]].update(
+                    {
+                        "age_fallback_last_checked_at_utc": now_text,
+                        "age_fallback_endpoint": "token-pairs",
+                    }
+                )
+                try:
+                    complete_pairs = fetch_token_pairs(
+                        token["chain"], token["token_address"], session=session
+                    )
+                    fallback_age = minimum_token_age_inferred(
+                        complete_pairs, selected_pair, current_time
+                    )
+                    if fallback_age.get("minimum_token_age_inferred_minutes") is not None:
+                        inferred_age = fallback_age
+                        age_fallback_resolved += 1
+                        updates_by_key[token["watchlist_key"]]["age_fallback_status"] = "resolved"
+                    else:
+                        updates_by_key[token["watchlist_key"]]["age_fallback_status"] = "no_pair_created_at"
+                except Exception as fallback_error:
+                    error_text = f"age_fallback: {fallback_error}"
+                    errors += 1
+                    updates_by_key[token["watchlist_key"]]["age_fallback_status"] = "error"
+            elif needs_age_fallback and age_fallback_calls >= max_fallback_calls:
+                age_fallback_skipped_limit += 1
             if selected_pair:
                 dex_status = "found"
                 market_score, components, metrics = calculate_market_score(
@@ -1898,17 +1986,11 @@ def run_cycle(dry_run=False, session=requests):
                     "minimum_token_age_inferred_source": social_eligibility["minimum_token_age_inferred_source"],
                 }
             )
-            selected_pair_address = selected_pair.get("pairAddress") if selected_pair else None
-            if selected_pair_address:
-                # Dexscreener's pairAddress is the usable pool/pair identity
-                # for monitor and position. PumpPortal may only provide a venue
-                # label (for example, "pump-amm") at discovery time.
-                updates_by_key[token["watchlist_key"]].update(
-                    {
-                        "pair_address": selected_pair_address,
-                        "pool_address": selected_pair_address,
-                    }
-                )
+            # Only PumpPortal discoveries need Dexscreener to complete the
+            # usable PumpSwap address. EVM pool identity belongs to Pool Scanner.
+            updates_by_key[token["watchlist_key"]].update(
+                selected_pair_address_update(token, selected_pair)
+            )
             if market_score is not None:
                 updates_by_key[token["watchlist_key"]]["market_score"] = market_score
                 updates_by_key[token["watchlist_key"]].update(metrics or {})
@@ -1972,6 +2054,9 @@ def run_cycle(dry_run=False, session=requests):
         "dex_not_found": dex_not_found,
         "errors": errors,
         "dex_batch_calls": dex_batch_calls,
+        "dex_age_fallback_calls": age_fallback_calls,
+        "dex_age_fallback_resolved": age_fallback_resolved,
+        "dex_age_fallback_skipped_limit": age_fallback_skipped_limit,
         "market_score_weights": weights,
         "watchlist_retention": retention_summary,
     }
