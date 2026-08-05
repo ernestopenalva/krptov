@@ -63,8 +63,8 @@ social_inference:
   max_active_tokens_per_cycle: 0
   max_social_checks_per_token: 0
   min_social_age_minutes: 0
-  # Porta universal de mercado: o ranker nao admite em nenhuma WL e a
-  # inferencia nao consulta tokens sem QLiq conhecida de pelo menos US$ 1.
+  # Trava universal de custo social: nenhuma chain consulta o X sem QLiq
+  # conhecida de pelo menos US$ 1. A admissao de mercado e configurada abaixo.
   min_quote_liquidity_usd: 1
   prioritize_market_score: true
 
@@ -116,6 +116,11 @@ ops_alerts:
   cooldown_seconds: 1800
 
 market_ranker:
+  # PumpPortal entrega migracoes graduadas; somente Solana exige QLiq na
+  # entrada. Nas chains EVM, QLiq permanece parte do score e da trava social.
+  admission_min_quote_liquidity_usd_by_chain:
+    solana: 1
+
   score_weights:
     quote_liquidity: 5
     volume_h24: 3

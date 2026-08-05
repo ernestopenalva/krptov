@@ -108,6 +108,9 @@ DEFAULT_CONFIG = {
             "pending_grace_minutes": 15,
             "max_rank_attempts": 5,
         },
+        "admission_min_quote_liquidity_usd_by_chain": {
+            "solana": 1,
+        },
         "social_eligibility": {
             "max_pool_age_minutes": 30,
         },
@@ -1241,7 +1244,7 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
     expired = 0
     social_orphans_repaired = 0
     blocked_quote_liquidity = 0
-    min_quote_liquidity = minimum_quote_liquidity_usd(config)
+    admission_quote_liquidity = admission_min_quote_liquidity_usd_by_chain(config)
 
     with watchlist_lock():
         watchlist = load_watchlist()
@@ -1279,7 +1282,10 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
                 kept_watchlist[watchlist_key] = entry
                 continue
 
-            quote_reason = quote_liquidity_block_reason(entry, min_quote_liquidity)
+            quote_reason = quote_liquidity_block_reason(
+                entry,
+                chain_admission_minimum_quote_liquidity_usd(entry, admission_quote_liquidity),
+            )
             if quote_reason:
                 blocked_quote_liquidity += 1
                 removed_records.append(
@@ -1314,7 +1320,10 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
                 continue
 
             if ranking_score(entry) is not None:
-                quote_reason = quote_liquidity_block_reason(entry, min_quote_liquidity)
+                quote_reason = quote_liquidity_block_reason(
+                    entry,
+                    chain_admission_minimum_quote_liquidity_usd(entry, admission_quote_liquidity),
+                )
                 if quote_reason:
                     buffer.pop(watchlist_key, None)
                     rejected += 1
@@ -1422,7 +1431,7 @@ def apply_ranker_updates_and_selection(updates_by_key, config, current_time):
         "expired_from_buffer": expired,
         "social_orphans_repaired": social_orphans_repaired,
         "blocked_quote_liquidity": blocked_quote_liquidity,
-        "min_quote_liquidity_usd": min_quote_liquidity,
+        "admission_min_quote_liquidity_usd_by_chain": admission_quote_liquidity,
         "max_entries": max_entries,
         "remaining": len(load_watchlist()),
         "buffer_remaining": len(load_ranking_buffer(config)),
@@ -1437,10 +1446,28 @@ def retention_config(config):
     return merge_dict(defaults, configured)
 
 
-def minimum_quote_liquidity_usd(config):
-    """Global first gate shared with Social Inference."""
-    social = config.get("social_inference") or {}
-    return max(0.0, config_float(social, "min_quote_liquidity_usd", 1))
+def admission_min_quote_liquidity_usd_by_chain(config):
+    """Admission gate, deliberately separate from the universal social-cost gate."""
+    configured = market_ranker_config(config).get(
+        "admission_min_quote_liquidity_usd_by_chain"
+    )
+    if not isinstance(configured, dict):
+        configured = DEFAULT_CONFIG["market_ranker"][
+            "admission_min_quote_liquidity_usd_by_chain"
+        ]
+
+    thresholds = {}
+    for chain, value in configured.items():
+        try:
+            thresholds[str(chain).strip().lower()] = max(0.0, float(value))
+        except (TypeError, ValueError):
+            continue
+    return thresholds
+
+
+def chain_admission_minimum_quote_liquidity_usd(entry, thresholds):
+    chain = str(entry.get("chain") or entry.get("chain_id") or "").strip().lower()
+    return float((thresholds or {}).get(chain, 0))
 
 
 def quote_liquidity_block_reason(entry, minimum):

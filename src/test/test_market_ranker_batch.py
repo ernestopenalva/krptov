@@ -224,23 +224,35 @@ class MarketRankerBatchTests(unittest.TestCase):
         self.assertEqual(metrics["selected_quote_liquidity_usd"], 4000)
         self.assertGreater(score, 80)
 
-    def test_quote_liquidity_gate_is_global_and_rejects_missing_or_below_one(self):
-        config = {"social_inference": {"min_quote_liquidity_usd": 1}}
-        minimum = market_ranker.minimum_quote_liquidity_usd(config)
-        self.assertEqual(minimum, 1)
-        self.assertEqual(
-            market_ranker.quote_liquidity_block_reason({"chain": "solana"}, minimum),
-            "market_admission_missing_quote_liquidity",
+    def test_quote_liquidity_admission_gate_applies_only_to_solana(self):
+        config = {
+            "market_ranker": {
+                "admission_min_quote_liquidity_usd_by_chain": {"solana": 1}
+            }
+        }
+        thresholds = market_ranker.admission_min_quote_liquidity_usd_by_chain(config)
+        solana_minimum = market_ranker.chain_admission_minimum_quote_liquidity_usd(
+            {"chain": "solana"}, thresholds
         )
+        evm_minimum = market_ranker.chain_admission_minimum_quote_liquidity_usd(
+            {"chain": "ethereum"}, thresholds
+        )
+        self.assertEqual(solana_minimum, 1)
+        self.assertEqual(evm_minimum, 0)
         self.assertEqual(
             market_ranker.quote_liquidity_block_reason(
-                {"chain": "ethereum", "quote_liquidity_usd": 0.99}, minimum
+                {"chain": "solana"}, solana_minimum
             ),
-            "market_admission_low_quote_liquidity",
+            "market_admission_missing_quote_liquidity",
         )
         self.assertIsNone(
             market_ranker.quote_liquidity_block_reason(
-                {"chain": "solana", "quote_liquidity_usd": 1}, minimum
+                {"chain": "ethereum", "quote_liquidity_usd": 0.99}, evm_minimum
+            )
+        )
+        self.assertIsNone(
+            market_ranker.quote_liquidity_block_reason(
+                {"chain": "solana", "quote_liquidity_usd": 1}, solana_minimum
             )
         )
 

@@ -49,3 +49,12 @@ evento=QLiq minima de US$ 1 passa a ser porta universal de admissao para todas a
 arquivos=src/modules/market_ranker.py,src/modules/social_inference.py,config/config.yaml,src/test/test_market_ranker_batch.py,src/test/test_social_eligibility.py
 regra=quote_liquidity_usd ausente ou menor que 1 nao e promovida pelo ranker; entradas existentes sao arquivadas com motivo explicito; ranking_buffer sem QLiq medido aguarda score e depois e bloqueado se a metrica continuar ausente
 estudo=src/tools/stop_loss_filter_study.py compara filtros isolados de QLiq,LiqDS,MinAg,score,volume,transacoes e variacao m5 contra positions com PNL catastrofico
+
+## 2026-08-04T23:17:45-03:00
+
+evento=QLiq minima de US$ 1 mantida como porta de admissao somente para Solana; nas chains EVM permanece no score e como trava universal antes de qualquer consulta paga ao X
+configuracao=market_ranker.admission_min_quote_liquidity_usd_by_chain.solana=1; social_inference.min_quote_liquidity_usd=1 para todas as chains
+rpc_pumpswap=layout imutavel da pool armazenado em cache; dois vaults e slot lidos juntos por getMultipleAccounts; primeira leitura usa duas RPCs e ticks seguintes usam uma
+protecoes_adicionais=nenhum backoff novo adicionado nesta alteracao
+arquivos=config/config.yaml,src/modules/market_ranker.py,src/market_data/pumpswap_provider.py,src/test/test_market_ranker_batch.py,src/test/test_pumpswap_provider.py
+validacao=49 testes aprovados incluindo ranker,social,monitor,position e provider PumpSwap
